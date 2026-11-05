@@ -1,0 +1,54 @@
+# DataDiet — local development infrastructure
+#
+# MySQL is used for local development in place of a managed database.
+# Start it from the repository root:
+#   docker compose -f infra/docker-compose.dev.yml up -d mysql
+#
+# The nginx service is a *future deployment* placeholder and is disabled by
+# default behind the "edge" profile:
+#   docker compose -f infra/docker-compose.dev.yml --profile edge up -d
+#
+# Development credentials below are throwaway local values. Real environments
+# must inject secrets via environment variables / a secret manager.
+
+name: datadiet-dev
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: datadiet-mysql-dev
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_dev_password
+      MYSQL_DATABASE: datadiet
+      MYSQL_USER: datadiet
+      MYSQL_PASSWORD: datadiet_dev_password
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - datadiet_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdatadiet_dev_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Future deployment entry point. Serves the built frontend and proxies /api
+  # to the backend on the host. Not used during local development (Vite's dev
+  # server proxies /api instead).
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: datadiet-nginx-dev
+    profiles: ["edge"]
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../frontend/dist:/usr/share/nginx/html:ro
+
+volumes:
+  datadiet_mysql_data:

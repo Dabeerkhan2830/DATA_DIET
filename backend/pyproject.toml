@@ -1,0 +1,20 @@
+# DataDiet backend tooling configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's documented dependency-injection style uses Depends()/Query() in
+# signature defaults; B008 does not apply meaningfully here. app/core/auth.py
+# holds the dependency *definitions* (require_permission, get_current_user),
+# so the same style applies there.
+"app/api/routes/*" = ["B008"]
+"app/core/auth.py" = ["B008"]
