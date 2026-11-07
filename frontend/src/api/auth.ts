@@ -1,14 +1,20 @@
 /**
- * Typed client for the Phase 7 authentication endpoints (ADR-0014).
+ * Typed client for the authentication endpoints (ADR-0014; Clerk added by
+ * Phase 6.0, ADR-0025).
  *
  * Three surfaces, mirroring backend/app/api/routes/auth.py:
  * - `fetchAuthConfig` is public and honest about what this deployment has.
- * - `devLogin` is a development/test convenience the server refuses in
- *   production; it is not single sign-on and never claims to be.
- * - `fetchMe` returns the *server-verified* identity for the stored token.
+ * - `devLogin` is a development/test convenience. The server refuses it once an
+ *   identity provider is configured, and in a protected environment the route is
+ *   not registered at all, so this call cannot become production authentication.
+ * - `fetchMe` returns the *server-verified* identity for whichever bearer
+ *   credential the client is presenting: a DataDiet token from `devLogin` or a
+ *   pasted issuer, or a Clerk session token supplied by the mounted provider.
+ *   The profile and permissions always come from DataDiet's own directory.
  *
- * There is no logout call: bearer tokens are stateless, so signing out is
- * discarding the token client-side.
+ * There is no logout call: DataDiet keeps no server-side session, so signing out
+ * means discarding the local credential — and, with a provider mounted, ending
+ * that provider's browser session too (see `auth/externalSession.ts`).
  */
 
 import { apiGet, apiPost } from "./client";

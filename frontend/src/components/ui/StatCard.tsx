@@ -9,13 +9,15 @@ export interface StatCardProps {
 
 export function StatCard({ label, value, hint, icon }: StatCardProps) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="rounded-card border border-line bg-surface p-card-x shadow-card">
       <div className="flex items-start justify-between gap-3">
-        <p className="text-xs font-semibold tracking-wide text-slate-500 uppercase">{label}</p>
-        {icon ? <span className="text-slate-400">{icon}</span> : null}
+        <p className="text-eyebrow font-semibold text-ink-muted uppercase tracking-[0.06em]">
+          {label}
+        </p>
+        {icon ? <span className="text-ink-subtle">{icon}</span> : null}
       </div>
-      <p className="mt-3 text-3xl font-semibold text-slate-900 tabular-nums">{value}</p>
-      {hint ? <p className="mt-1 text-xs text-slate-500">{hint}</p> : null}
+      <p className="mt-3 text-display font-semibold text-ink tabular-nums">{value}</p>
+      {hint ? <p className="mt-1 text-meta text-ink-muted">{hint}</p> : null}
     </div>
   );
 }

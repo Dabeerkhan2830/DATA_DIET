@@ -15,6 +15,7 @@ export const GOVERNANCE_PREFIX = "/api/v1/governance";
 export function fetchAssetGovernance(
   assetId: number,
   institutionId?: number,
+  signal?: AbortSignal,
 ): Promise<GovernanceDetail> {
   const query = new URLSearchParams();
   if (institutionId !== undefined) {
@@ -23,5 +24,6 @@ export function fetchAssetGovernance(
   const qs = query.toString();
   return apiGet<GovernanceDetail>(
     `${GOVERNANCE_PREFIX}/assets/${assetId}${qs ? `?${qs}` : ""}`,
+    signal,
   );
 }

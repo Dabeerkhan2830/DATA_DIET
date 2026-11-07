@@ -1,34 +1,15 @@
 # --- Secrets / environment ---
 .env
-.env.*
-*.env
-*.env.*
-!.env.example
+.env.local
+.env.*.local
 frontend/.env
-frontend/.env.*
-*.pem
-*.key
-*.cert
-*.crt
-*.pfx
-*.p12
-*.pkcs12
-*id_rsa*
-*id_ecdsa*
-*id_ed25519*
-secrets.*
-*secret*.*
-credentials.json
-*credentials*.json
-*service-account*.json
-*.secret
+frontend/.env.local
 
 # --- Python ---
 .venv/
 venv/
 __pycache__/
 *.py[cod]
-*$py.class
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
@@ -43,7 +24,6 @@ coverage/
 
 # --- Test/build output ---
 frontend/coverage/
-pytest_out.txt
 
 # --- IDE / OS ---
 .vscode/
@@ -51,25 +31,25 @@ pytest_out.txt
 *.swp
 .DS_Store
 Thumbs.db
-Desktop.ini
 
 # --- Logs ---
 *.log
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 
-# --- Local data and databases ---
+# --- Local data (never commit real data) ---
 local_storage/
 storage/
 *.local.db
-*.db
-*.sqlite
-*.sqlite3
+# Re-include one path: `storage/` above is a *data* rule and matches at any
+# depth, so it also hid `backend/app/services/storage/` — Phase 6.x's source
+# package (ADR-0026), which contains code and no data. The exception is pinned
+# to that exact directory, so every other `storage/` anywhere in the tree stays
+# ignored; nothing that is meant to hold real data belongs under this path.
+!backend/app/services/storage/
 
-# --- Archives ---
-*.zip
-*.tar
-*.gz
-*.rar
-*.7z
+# --- Local scratch artifacts (redesign baseline, 2026-11-01) ---
+# pytest scratch databases under backend/ (test.db, tmp_test*.db, ...)
+backend/*.db
+*.db-journal
+# captured test output at the repo root
+pytest_out.txt

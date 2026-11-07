@@ -1,16 +1,30 @@
-"""Authentication and authorization for DataDiet (Phase 7).
+"""Authentication and authorization for DataDiet (Phase 7, extended in Phase 6.0).
 
-Identity comes from a verified bearer token (``app.core.security``) and is
-resolved against the local user directory (``app_users`` / ``user_memberships``).
+Identity comes from a verified bearer token and is resolved against the local
+user directory (``app_users`` / ``user_memberships`` / ``external_identities``).
 The directory is authoritative for *authorization*: an identity provider proves
 who someone is, while DataDiet decides what that account may do. Token claims
-about institution or role are therefore never used for authorization.
+about institution, role, **or Clerk metadata** are therefore never used for
+authorization.
+
+Two verification paths exist and the *server's configuration* chooses between
+them — a token never chooses (ADR-0025):
+
+``staging`` / ``production``
+    Clerk only: RS256 against the provider's cached JWKS. There is no HS256
+    fallback, and there is no development provider to fall back to (its route is
+    not even registered). Missing or invalid Clerk configuration fails closed.
+
+``development`` / ``test``
+    The strict HS256 boundary from ADR-0014, unless a Clerk issuer is
+    configured — in which case Clerk is used, and a Clerk verification failure
+    still is not retried as HS256.
 
 The layer is fail-closed:
 
-* in ``ENVIRONMENT=production`` without a configured signing secret every
-  protected request returns 503 — the app never falls back to an anonymous or
-  development identity;
+* in a protected environment with no usable Clerk configuration every protected
+  request returns 503 — the app never falls back to an anonymous or development
+  identity;
 * a missing/invalid/expired token returns 401;
 * a valid identity lacking the required permission returns 403;
 * a resource outside the caller's institution scope returns 404, so the
@@ -30,11 +44,21 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import DEV_AUTH_JWT_SECRET, get_settings
-from app.core.security import TokenError, verify_token
-from app.db.models import AppUser, UserMembership
+from app.core.config import DEV_AUTH_JWT_SECRET, Settings, get_settings
+from app.core.security import (
+    TokenError,
+    get_jwks_client,
+    verify_clerk_token,
+    verify_token,
+)
+from app.db.models import AppUser, ExternalIdentity, UserMembership
 from app.db.session import get_db
 from app.services.audit import record_event
+
+#: Which verification path produced the claims, and therefore which subject
+#: resolution rule applies. Never derived from the token itself.
+PROVIDER_LOCAL = "local"
+PROVIDER_CLERK = "clerk"
 
 # --------------------------------------------------------------------------- #
 # Permission vocabulary and role matrix
@@ -161,6 +185,31 @@ def _service_unavailable(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
 
 
+#: Shared 503 text for "nothing usable is configured", so the message a client
+#: sees never depends on which secret happened to be missing.
+_AUTH_UNCONFIGURED_MESSAGE = (
+    "auth_not_configured: Authentication is not configured for this deployment: "
+    "neither a Clerk issuer nor a signing secret is set, so every authenticated "
+    "endpoint is unavailable. See docs/decisions.md ADR-0014 and ADR-0025."
+)
+
+#: Address suffix used when a provisioned Clerk account has no email claim.
+#: ``.invalid`` is reserved by RFC 2606 and can never receive mail, which makes
+#: such a row unmistakably a placeholder rather than somebody's address.
+PROVISIONAL_EMAIL_DOMAIN = "identity.invalid"
+
+
+def bearer_boundary_secret(settings: Settings) -> bool:
+    """Whether a protected deployment carries a signing secret of its own.
+
+    This is ADR-0014's bearer boundary: the API verifies tokens but issues none,
+    so an external system must sign them. The development placeholder never
+    qualifies — a protected environment may not be authenticated by a secret that
+    is published in the repository.
+    """
+    return bool(settings.auth_jwt_secret) and settings.auth_jwt_secret != DEV_AUTH_JWT_SECRET
+
+
 def _bearer_token(request: Request) -> str:
     header = request.headers.get("Authorization", "")
     scheme, _, value = header.partition(" ")
@@ -171,34 +220,268 @@ def _bearer_token(request: Request) -> str:
     return value.strip()
 
 
-def require_auth_configured() -> None:
-    """Fail closed when production has no trustworthy authentication.
+def _verify_bearer(request: Request) -> tuple[dict, str]:
+    """Verify the request's bearer token and report which path verified it.
 
-    Two situations are refused with 503 so an unconfigured deployment can never
-    authenticate anyone:
-
-    * no ``AUTH_JWT_SECRET`` is set; or
-    * the secret is the well-known *development* placeholder — including the
-      case where a settings object built outside production had its
-      ``environment`` swapped afterwards.
-
-    Development and test always resolve to the placeholder, so the whole stack
-    stays exercisable without an identity provider. See ADR-0014.
+    The path is chosen from server configuration before any token is parsed, and
+    a Clerk failure is never retried as HS256: on the Clerk path the only way
+    out of this function with claims is a verified RS256 signature.
     """
     settings = get_settings()
-    if settings.environment != "production":
-        return
-    if not settings.auth_jwt_secret or settings.auth_jwt_secret == DEV_AUTH_JWT_SECRET:
-        raise _service_unavailable(
-            "auth_not_configured: Authentication is not configured for this "
-            "deployment: no identity provider or signing secret is set "
-            "(AUTH_JWT_SECRET), so every authenticated endpoint is unavailable. "
-            "See ADR-0014."
+    token = _bearer_token(request)
+    if settings.clerk_enabled:
+        try:
+            claims = verify_clerk_token(
+                token,
+                issuer=settings.clerk_issuer,
+                audience=settings.clerk_audience,
+                jwks_client=get_jwks_client(settings.resolved_clerk_jwks_url),
+            )
+        except TokenError as cause:
+            if cause.reason == "identity_provider_unavailable":
+                # The provider's public-key endpoint is unreachable and nothing
+                # is cached. Refusing service is honest; answering 401 would make
+                # the frontend discard a perfectly good session token.
+                raise _service_unavailable(
+                    "identity_provider_unavailable: The identity provider's signing keys "
+                    "could not be retrieved, so this request cannot be verified."
+                ) from None
+            raise _unauthenticated(cause.message, code=cause.reason) from None
+        return claims, PROVIDER_CLERK
+
+    try:
+        claims = verify_token(
+            token,
+            issuer=settings.auth_jwt_issuer,
+            audience=settings.auth_jwt_audience,
+            secret=settings.auth_jwt_secret,
         )
+    except TokenError as cause:
+        raise _unauthenticated(cause.message, code=cause.reason) from None
+    return claims, PROVIDER_LOCAL
+
+
+def require_auth_configured() -> None:
+    """Fail closed when a protected deployment has no trustworthy authentication.
+
+    In ``staging``/``production`` exactly two things are acceptable, and nothing
+    else is: a working Clerk configuration (the supported path, and the one that
+    wins whenever it is configured), or the ADR-0014 *bearer boundary* — an
+    explicit, strong ``AUTH_JWT_SECRET`` on tokens an external system issued,
+    with no browser sign-in. Anything else is refused with 503 for every
+    protected endpoint.
+
+    In particular a protected environment can never be authenticated by the
+    development placeholder secret or by the development sign-in provider, whose
+    route is not even registered, so there is no anonymous path that creates an
+    account or grants platform administration. The placeholder is excluded
+    explicitly rather than by environment alone, because a settings object built
+    outside a protected environment can have had its ``environment`` swapped
+    after construction.
+    """
+    settings = get_settings()
+    if settings.protected_environment:
+        if settings.clerk_enabled:
+            return
+        if bearer_boundary_secret(settings):
+            return
+        raise _service_unavailable(
+            "auth_not_configured: This deployment is configured for a protected "
+            "environment, but no trusted authentication is usable: CLERK_ISSUER is "
+            "missing or invalid and no signing secret is configured. Every "
+            "authenticated endpoint is unavailable and the development sign-in "
+            "provider is not registered. See docs/decisions.md ADR-0014 and ADR-0025."
+        )
+
+    # Development and test. The placeholder secret is legitimate here precisely
+    # because it is *not* honoured above; a settings object whose secret was
+    # cleared after construction still fails closed.
+    if settings.auth_jwt_secret:
+        return
+    if settings.clerk_enabled:
+        return
+    raise _service_unavailable(_AUTH_UNCONFIGURED_MESSAGE)
+
+
+@dataclass(frozen=True)
+class AuthenticationReadiness:
+    """Credential-free description of the authentication path in force.
+
+    Produced by :func:`describe_authentication` for the readiness probe, which
+    has to answer truthfully without being able to raise.
+    """
+
+    configured: bool
+    provider: str
+    issuer: str
+    detail: str
+
+
+def describe_authentication() -> AuthenticationReadiness:
+    """Non-raising mirror of :func:`require_auth_configured` and :func:`_verify_bearer`.
+
+    The *provider* is the one ``_verify_bearer`` would actually use — a Clerk
+    issuer wins even in development, because that is how the request path
+    behaves. The *configured* flag is whether ``require_auth_configured`` would
+    let a request through. No secret, key or token is ever reported; the Clerk
+    issuer origin is public information by design.
+    """
+    settings = get_settings()
+    if settings.protected_environment:
+        if settings.clerk_enabled:
+            return AuthenticationReadiness(
+                configured=True,
+                provider="clerk",
+                issuer=settings.clerk_issuer,
+                detail="Clerk RS256 verification against the cached JWKS endpoint.",
+            )
+        if bearer_boundary_secret(settings):
+            return AuthenticationReadiness(
+                configured=True,
+                provider="signing_secret",
+                issuer="",
+                detail=(
+                    "Bearer-token boundary (ADR-0014): tokens are verified here but "
+                    "issued elsewhere, and the development sign-in route is not registered."
+                ),
+            )
+        return AuthenticationReadiness(
+            configured=False,
+            provider="none",
+            issuer="",
+            detail=(
+                "auth_not_configured: CLERK_ISSUER is missing or invalid and no signing "
+                "secret is configured, so every authenticated endpoint answers 503."
+            ),
+        )
+    if settings.clerk_enabled:
+        return AuthenticationReadiness(
+            configured=True,
+            provider="clerk",
+            issuer=settings.clerk_issuer,
+            detail="Clerk RS256 verification is configured and takes precedence.",
+        )
+    if settings.auth_jwt_secret:
+        return AuthenticationReadiness(
+            configured=True,
+            provider="development",
+            issuer="",
+            detail=(
+                "Development/test signing secret in use; never available in "
+                "staging or production."
+            ),
+        )
+    return AuthenticationReadiness(
+        configured=False,
+        provider="none",
+        issuer="",
+        detail="auth_not_configured: no Clerk issuer and no signing secret.",
+    )
+
+
+def _resolve_clerk_subject(db: Session, claims: dict) -> AppUser:
+    """Map a verified Clerk ``sub`` onto a DataDiet account.
+
+    Clerk's ``sub`` is the *only* thing that names an account here — never the
+    email, never ``pubm``/``nbf`` metadata, never a role claim. An identity that
+    has no binding is refused unless the operator has explicitly turned on
+    permissionless provisioning, and even then provisioning can never grant
+    ``is_platform_admin`` or a membership.
+    """
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject.strip():
+        raise _unauthenticated(
+            "The bearer token carries no subject this server can map to an account.",
+            code="invalid_subject",
+        )
+    subject = subject.strip()
+
+    binding = db.execute(
+        select(ExternalIdentity).where(
+            ExternalIdentity.provider == PROVIDER_CLERK,
+            ExternalIdentity.external_subject == subject,
+        )
+    ).scalar_one_or_none()
+
+    if binding is not None:
+        user = db.get(AppUser, binding.app_user_id)
+        if user is None:
+            raise _unauthenticated(
+                "The authenticated account is unknown or deactivated.", code="unknown_account"
+            )
+        return user
+
+    if not get_settings().clerk_auto_provision:
+        raise _unauthenticated(
+            "This identity is not linked to a DataDiet account yet; an administrator "
+            "must link it first.",
+            code="unknown_account",
+        )
+    return _provision_clerk_account(db, subject=subject, claims=claims)
+
+
+def _provision_clerk_account(db: Session, *, subject: str, claims: dict) -> AppUser:
+    """Create a *permissionless* account for a verified Clerk identity.
+
+    Reached only when ``CLERK_AUTO_PROVISION=true``. The account is created with
+    ``is_platform_admin=false`` and no membership, so it can sign in and see
+    nothing until an administrator grants a membership: provisioning is an
+    acknowledgement that someone authenticated, never a grant of authority.
+    """
+    email_claim = claims.get("email")
+    observed = email_claim.strip().lower() if isinstance(email_claim, str) else ""
+    name_claim = claims.get("name")
+    display = name_claim.strip() if isinstance(name_claim, str) and name_claim.strip() else subject
+
+    email = observed or f"clerk-{subject}@{PROVISIONAL_EMAIL_DOMAIN}"
+    clash = db.execute(select(AppUser).where(AppUser.email == email)).scalar_one_or_none()
+    if clash is not None:
+        # Never merge two identities because an address happens to match: the
+        # directory would silently inherit whoever already held that email.
+        raise _unauthenticated(
+            "This identity is not linked to a DataDiet account yet; an administrator "
+            "must link it first.",
+            code="unknown_account",
+        )
+
+    user = AppUser(
+        email=email,
+        display_name=display[:200],
+        is_platform_admin=False,
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    db.add(
+        ExternalIdentity(
+            provider=PROVIDER_CLERK,
+            external_subject=subject[:120],
+            app_user_id=user.id,
+            last_email=observed or None,
+            bound_by="auto_provision",
+        )
+    )
+    db.commit()
+    record_event(
+        db,
+        actor=email,
+        event_type="auth.identity_provisioned",
+        entity_type="app_user",
+        entity_id=user.id,
+        payload={
+            "provider": PROVIDER_CLERK,
+            "external_subject": subject,
+            "via": "auto_provision",
+            "is_platform_admin": False,
+            "memberships": 0,
+        },
+    )
+    db.refresh(user)
+    return user
 
 
 def _resolve_subject(db: Session, claims: dict) -> AppUser:
-    """Map a verified token onto a local account.
+    """Map a verified development/test token onto a local account.
 
     Three subject shapes are accepted, in order:
 
@@ -242,9 +525,20 @@ def _resolve_subject(db: Session, claims: dict) -> AppUser:
     )
 
 
-def build_current_user(db: Session, claims: dict) -> CurrentUser:
-    """Resolve verified claims against the local user directory."""
-    user = _resolve_subject(db, claims)
+def build_current_user(
+    db: Session, claims: dict, *, provider: str = PROVIDER_LOCAL
+) -> CurrentUser:
+    """Resolve verified claims against the local user directory.
+
+    ``provider`` records which verification path produced the claims, and so
+    which subject rule applies. It is chosen by this server, never read from the
+    token, and it changes nothing about *authorization*: roles and institution
+    scope come from the directory either way.
+    """
+    if provider == PROVIDER_CLERK:
+        user = _resolve_clerk_subject(db, claims)
+    else:
+        user = _resolve_subject(db, claims)
     if not user.is_active:
         raise _unauthenticated(
             "The authenticated account is unknown or deactivated.", code="unknown_account"
@@ -294,18 +588,8 @@ def get_current_user(
 ) -> CurrentUser:
     """FastAPI dependency: authenticate the request or fail closed."""
     require_auth_configured()
-    token = _bearer_token(request)
-    settings = get_settings()
-    try:
-        claims = verify_token(
-            token,
-            issuer=settings.auth_jwt_issuer,
-            audience=settings.auth_jwt_audience,
-            secret=settings.auth_jwt_secret,
-        )
-    except TokenError as cause:
-        raise _unauthenticated(cause.message, code=cause.reason) from None
-    return build_current_user(db, claims)
+    claims, provider = _verify_bearer(request)
+    return build_current_user(db, claims, provider=provider)
 
 
 def require_permission(permission: str) -> Callable[..., CurrentUser]:

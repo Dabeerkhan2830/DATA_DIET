@@ -1,0 +1,332 @@
+name: Azure Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment to target
+        type: choice
+        required: true
+        default: staging
+        options: [staging, production]
+      deploy_infrastructure:
+        description: Run Bicep what-if and apply the selected parameter file
+        type: boolean
+        required: true
+        default: false
+      deploy_backend:
+        description: Build and deploy FastAPI to Azure App Service
+        type: boolean
+        required: true
+        default: false
+      deploy_frontend:
+        description: Build and deploy React/Vite to Azure Static Web Apps
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: datadiet-azure-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.14.1"
+  NODE_VERSION: "24.13.1"
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  AZURE_BACKEND_APP_NAME: ${{ vars.AZURE_BACKEND_APP_NAME }}
+  AZURE_STATIC_WEB_APP_NAME: ${{ vars.AZURE_STATIC_WEB_APP_NAME }}
+  DATADIET_API_BASE_URL: ${{ vars.DATADIET_API_BASE_URL }}
+  DATADIET_HEALTHCHECK_URL: ${{ vars.DATADIET_HEALTHCHECK_URL }}
+  DATADIET_FRONTEND_URL: ${{ vars.DATADIET_FRONTEND_URL }}
+
+jobs:
+  preflight:
+    name: Validate deployment intent and configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should_deploy: ${{ steps.check.outputs.should_deploy }}
+      parameter_file: ${{ steps.map.outputs.parameter_file }}
+    steps:
+      - name: Check selected targets and required variables
+        id: check
+        shell: bash
+        env:
+          DEPLOY_INFRASTRUCTURE: ${{ inputs.deploy_infrastructure }}
+          DEPLOY_BACKEND: ${{ inputs.deploy_backend }}
+          DEPLOY_FRONTEND: ${{ inputs.deploy_frontend }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          requested=false
+          [[ "$DEPLOY_INFRASTRUCTURE" == "true" || "$DEPLOY_BACKEND" == "true" || "$DEPLOY_FRONTEND" == "true" ]] && requested=true
+          if [[ "$requested" == "false" ]]; then
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No deployment target selected. Validation only; no Azure login or deployment."
+            exit 0
+          fi
+          missing=()
+          for name in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if [[ "$DEPLOY_BACKEND" == "true" ]]; then
+            [[ -n "${AZURE_BACKEND_APP_NAME:-}" ]] || missing+=("AZURE_BACKEND_APP_NAME")
+            [[ -n "${DATADIET_HEALTHCHECK_URL:-}" ]] || missing+=("DATADIET_HEALTHCHECK_URL")
+          fi
+          if [[ "$DEPLOY_FRONTEND" == "true" ]]; then
+            [[ -n "${AZURE_STATIC_WEB_APP_NAME:-}" ]] || missing+=("AZURE_STATIC_WEB_APP_NAME")
+            [[ -n "${DATADIET_API_BASE_URL:-}" ]] || missing+=("DATADIET_API_BASE_URL")
+            [[ -n "${DATADIET_FRONTEND_URL:-}" ]] || missing+=("DATADIET_FRONTEND_URL")
+          fi
+          case "$INPUT_ENVIRONMENT" in
+            staging|production) ;;
+            *) echo "::error::Unsupported environment"; exit 1 ;;
+          esac
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Deployment requested but required variables/files are missing: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Preflight passed."
+      - name: Select Bicep parameter file
+        id: map
+        shell: bash
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_ENVIRONMENT" in
+            staging) echo "parameter_file=infra/azure/params/dev.parameters.json" >> "$GITHUB_OUTPUT" ;;
+            production) echo "parameter_file=infra/azure/params/prod.parameters.json" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Unsupported environment"; exit 1 ;;
+          esac
+
+  validate:
+    name: Validate application and infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+      - name: Lint backend and operator scripts
+        working-directory: backend
+        run: |
+          python -m ruff check .
+          python -m ruff check ../scripts
+      - name: Backend tests
+        working-directory: backend
+        run: python -m pytest
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend type check
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Frontend tests
+        working-directory: frontend
+        run: npm test
+      - name: Frontend production build
+        working-directory: frontend
+        run: npm run build
+      - name: Check Azure CLI and Bicep availability
+        run: |
+          set -euo pipefail
+          command -v az
+          az version
+          az bicep version || az bicep install
+      - name: Compile and lint Bicep
+        run: |
+          set -euo pipefail
+          for file in infra/azure/main.bicep infra/azure/modules/*.bicep; do
+            echo "::group::$file"
+            az bicep build --file "$file"
+            az bicep lint --file "$file"
+            echo "::endgroup::"
+          done
+      - name: Check required parameter files exist
+        run: |
+          set -euo pipefail
+          test -f infra/azure/params/dev.parameters.json
+          test -f infra/azure/params/prod.parameters.json
+      - name: Check parameter files against main template
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, re, sys
+          template = pathlib.Path("infra/azure/main.bicep").read_text(encoding="utf-8")
+          declared = dict(re.findall(r"^param\s+(\w+)\s+(\w+)", template, re.M))
+          defaulted = set(re.findall(r"^param\s+(\w+)\s+\w+.*?=\s", template, re.M))
+          required = set(declared) - defaulted
+          types = {"string": str, "int": int, "bool": bool, "array": list, "object": dict}
+          errors = []
+          for path in sorted(pathlib.Path("infra/azure/params").glob("*.parameters.json")):
+              params = json.loads(path.read_text(encoding="utf-8")).get("parameters", {})
+              unknown, missing = sorted(set(params)-set(declared)), sorted(required-set(params))
+              if unknown: errors.append(f"{path}: unknown parameters {unknown}")
+              if missing: errors.append(f"{path}: missing required parameters {missing}")
+              for name, entry in params.items():
+                  if name not in declared: continue
+                  if "reference" in entry: continue
+                  if "value" not in entry:
+                      errors.append(f"{path}.{name}: missing value/reference")
+                      continue
+                  expected = types.get(declared[name])
+                  if expected and type(entry["value"]) is not expected:
+                      errors.append(f"{path}.{name}: expected {expected.__name__}, got {type(entry['value']).__name__}")
+          if errors:
+              for error in errors: print(f"::error::{error}")
+              sys.exit(1)
+          print("Parameter files structurally match main.bicep.")
+          PY
+
+  deploy:
+    name: Deploy DataDiet (${{ inputs.environment }})
+    needs: [preflight, validate]
+    if: needs.preflight.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up Python
+        if: inputs.deploy_backend
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Node.js
+        if: inputs.deploy_frontend
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build backend package
+        if: inputs.deploy_backend
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          zip -qr "$GITHUB_WORKSPACE/backend.zip" . \
+            -x '.venv/*' -x '.env' -x '.env.*' -x '.git/*' \
+               '__pycache__/*' '*/__pycache__/*' '*.pyc' \
+               'tests/*' 'test*.db' 'tmp_*.db'
+          unzip -l "$GITHUB_WORKSPACE/backend.zip" | grep -E ' requirements.txt$' >/dev/null
+          unzip -l "$GITHUB_WORKSPACE/backend.zip" | grep -E ' app/main.py$' >/dev/null
+      - name: Build frontend package
+        if: inputs.deploy_frontend
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ vars.DATADIET_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          test -f dist/index.html
+      - name: Confirm Azure CLI is available
+        run: |
+          set -euo pipefail
+          command -v az
+          az version
+      - name: Azure OIDC login
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api%3A%2F%2FAzureADTokenExchange")"
+          oidc_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$response")"
+          unset response
+          [[ -n "$oidc_token" ]] || { echo "::error::GitHub OIDC token unavailable"; exit 1; }
+          az login --service-principal --username "$AZURE_CLIENT_ID" \
+            --tenant "$AZURE_TENANT_ID" --federated-token "$oidc_token" --output none
+          unset oidc_token
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          az account show --query '{tenant:tenantId,subscription:id}' --output table
+      - name: Bicep what-if
+        if: inputs.deploy_infrastructure
+        env:
+          PARAMETER_FILE: ${{ needs.preflight.outputs.parameter_file }}
+        run: |
+          set -euo pipefail
+          az deployment group what-if --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/azure/main.bicep --parameters "@$PARAMETER_FILE"
+      - name: Apply infrastructure
+        if: inputs.deploy_infrastructure
+        env:
+          PARAMETER_FILE: ${{ needs.preflight.outputs.parameter_file }}
+        run: |
+          set -euo pipefail
+          az deployment group create --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/azure/main.bicep --parameters "@$PARAMETER_FILE" \
+            --mode Incremental --output none
+          echo "::notice::No Alembic migrations or secret population were performed."
+      - name: Deploy backend to App Service
+        if: inputs.deploy_backend
+        run: |
+          set -euo pipefail
+          az webapp deploy --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_BACKEND_APP_NAME" --src-path backend.zip --type zip
+      - name: Verify backend liveness
+        if: inputs.deploy_backend
+        env:
+          HEALTHCHECK_URL: ${{ vars.DATADIET_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          # Operator supplies the actual public liveness URL from FastAPI.
+          # --fail accepts any 2xx response; no route/status is guessed here.
+          for attempt in {1..8}; do
+            if curl --fail --silent --show-error --output /dev/null \
+                --connect-timeout 10 --max-time 20 "$HEALTHCHECK_URL"; then
+              echo "Backend liveness endpoint returned a successful response."
+              exit 0
+            fi
+            echo "Attempt ${attempt}/8 failed; retrying in 15 seconds."
+            sleep 15
+          done
+          echo "::error::Backend liveness check failed. Inspect App Service logs and the configured URL."
+          exit 1
+      - name: Deploy frontend to Static Web Apps
+        if: inputs.deploy_frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(az staticwebapp secrets list --name "$AZURE_STATIC_WEB_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" --query properties.apiKey --output tsv)"
+          if [[ -z "$token" || "$token" == "None" ]]; then
+            echo "::error::Static Web Apps deployment token was not returned."
+            exit 1
+          fi
+          echo "::add-mask::${token}"
+          npx --yes @azure/static-web-apps-cli@2.1.0 \
+            deploy ./frontend/dist --deployment-token "$token" --env "$swa_environment"
+          unset token
+      - name: Verify frontend response
+        if: inputs.deploy_frontend
+        env:
+          FRONTEND_URL: ${{ vars.DATADIET_FRONTEND_URL }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 30 --output /dev/null "$FRONTEND_URL"
+          echo "Frontend URL returned a successful response."
+      - name: Azure logout
+        if: always()
+        run: az logout || true

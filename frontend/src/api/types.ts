@@ -78,6 +78,75 @@ export interface InventoryRecord {
   last_reviewed: string | null;
 }
 
+/* ------------------------------------------------------------------------
+ * Inventory: the real asset table (GET /api/v1/assets).
+ * Mirrors backend/app/api/schemas/assets.py — `Asset` and `AssetListResponse`.
+ * The synthetic `/demo/inventory` fixture above is a different, older shape.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * `Asset.sensitivity` widens the four-level scale with `unknown`, which is what
+ * the backend stores for an unclassified asset (`Sensitivity` in
+ * schemas/assets.py is a five-value Literal).
+ */
+export type AssetSensitivity = Sensitivity | "unknown";
+
+/** `LifecycleStatus` Literal in backend/app/api/schemas/assets.py. */
+export type LifecycleStatus = "active" | "under_review" | "archived" | "pending_disposal";
+
+export interface Asset {
+  id: number;
+  institution_id: number | null;
+  data_source_id: number;
+  external_id: string;
+  title: string;
+  description: string | null;
+  record_type: string;
+  category: string | null;
+  source_type: string | null;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number;
+  checksum_sha256: string | null;
+  sensitivity: AssetSensitivity;
+  contains_personal_data: boolean;
+  duplicate_of_id: number | null;
+  owner_team: string | null;
+  owner_email: string | null;
+  lifecycle_status: LifecycleStatus;
+  last_reviewed: string | null;
+  source_created_at: string | null;
+  source_modified_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The page of assets the server returned, with its own pagination metadata. */
+export interface AssetListResponse {
+  items: Asset[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
+}
+
+/**
+ * Query parameters accepted by `GET /api/v1/assets`.
+ *
+ * There is deliberately no sort field: the route orders by `updated_at`
+ * descending and exposes no ordering parameter.
+ */
+export interface AssetListQuery {
+  page?: number;
+  per_page?: number;
+  search?: string;
+  category?: string;
+  sensitivity?: AssetSensitivity;
+  source_type?: string;
+  lifecycle_status?: LifecycleStatus;
+  institution_id?: number;
+}
+
 export interface RiskIndicatorView {
   code: string;
   label: string;
@@ -242,23 +311,35 @@ export interface Assessment {
   retention_deadline?: string | null;
 }
 
+/**
+ * Mirrors `RecommendationItem` (`backend/app/api/schemas/retention.py:256`).
+ *
+ * Every field is always serialized: an optional Pydantic field arrives as
+ * `null`, never as `undefined`, so the fields the queue can genuinely leave
+ * empty are `| null` rather than `?`. `id` is the assessment this row is the
+ * latest of — `services/retention.py` returns `ra.id` — and is what a review
+ * decision is recorded against.
+ */
 export interface RecommendationItem {
+  id: number | null;
   asset_id: number;
   asset_title: string | null;
-  institution_id?: number | null;
+  institution_id: number | null;
   recommendation: RecommendationState;
   rationale: string;
   severity: FindingSeverity | null;
   policy_id: number | null;
   policy_version_id: number | null;
+  policy_version_number: number | null;
   holds_active: number;
   assessed_at: string;
   findings: AssessmentFinding[] | null;
-  review_status?: "open" | "decided" | null;
-  latest_decision?: DecisionValue | null;
-  decisions_recorded?: number;
-  retention_deadline?: string | null;
-  days_overdue?: number | null;
+  retention_deadline: string | null;
+  /** Days past `retention_deadline`; negative while the deadline is ahead. */
+  days_overdue: number | null;
+  decisions_recorded: number;
+  review_status: ReviewStatus | null;
+  latest_decision: DecisionValue | null;
 }
 
 export interface PaginatedRecommendations {
@@ -357,6 +438,14 @@ export interface QualityFinding {
   remediation: string;
   duplicate_status?: string | null;
   related_asset_id?: number | null;
+}
+
+/** One entry of `GET /classification/checks`: a documented check and its intent. */
+export interface QualityCheckDescriptor {
+  check: string;
+  severity: QualitySeverity;
+  description: string;
+  remediation: string;
 }
 
 export interface AssetQualityReport {
@@ -526,6 +615,153 @@ export interface GovernanceDetail {
   provenance: GovernanceProvenance;
 }
 
+/* --------------------- sources & scan jobs (Phase 5.8) --------------------- */
+// Mirrors backend/app/api/schemas/connectors.py. Every literal below is the
+// server's own vocabulary: `ConnectorType` accepts exactly two values,
+// `SourceStatus` two, `ScanStatus` six. No field carries a credential — the
+// schema rejects secret-looking `config` keys at write time, and neither a
+// request nor a response ever contains an absolute filesystem path.
+
+/** `ConnectorType`: the only two source kinds the server can build. */
+export type ConnectorType = "synthetic" | "local_folder";
+
+/**
+ * `SourceStatus`: whether the operator has enabled the record, nothing more.
+ * The server sets `active` at creation without touching the source, so this is
+ * not evidence of a live connection — see `Source.last_validation_ok`.
+ */
+export type SourceStatus = "active" | "inactive";
+
+/** `ScanStatus`: the six values the scan service can store. */
+export type ScanStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "COMPLETED_WITH_ERRORS"
+  | "FAILED"
+  | "CANCELLED";
+
+/** `ScanResultRead.status`: how one discovered record fared in a scan. */
+export type ScanResultStatus = "imported" | "skipped" | "error";
+
+/** `ScanErrorRead.severity`: the server only ever writes these two. */
+export type ScanErrorSeverity = "error" | "warning";
+
+/** `Source`: one connected data source configuration record. */
+export interface Source {
+  id: number;
+  institution_id: number | null;
+  name: string;
+  /** Nullable in the response; the list route excludes rows without one. */
+  connector_type: string | null;
+  /** An allow-list key configured by an operator, never a path. */
+  root_key: string | null;
+  config: Record<string, unknown> | null;
+  status: string;
+  created_by: string;
+  /** Written only by `POST /sources/{id}/validate`; null means never validated. */
+  last_validated_at: string | null;
+  last_validation_ok: boolean | null;
+  last_validation_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `PaginatedSources` for `GET /sources`. */
+export interface SourceListResponse {
+  items: Source[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
+}
+
+/** `SourceValidationResult` for `POST /sources/{id}/validate`. */
+export interface SourceValidationResult {
+  id: number;
+  ok: boolean;
+  message: string;
+  validated_at: string | null;
+}
+
+/** `ScanJobRead`: counters are absolute, and there is no percentage field. */
+export interface ScanJob {
+  id: number;
+  data_source_id: number;
+  institution_id: number | null;
+  status: ScanStatus;
+  batch_size: number;
+  total_discovered: number;
+  total_imported: number;
+  total_skipped: number;
+  total_errors: number;
+  /** Set only on a job created by `POST /scan-jobs/{id}/retry`. */
+  retried_from_job_id: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+/** `PaginatedScanJobs` for `GET /scan-jobs`. */
+export interface ScanJobListResponse {
+  items: ScanJob[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
+}
+
+/** `ScanResultRead`: one per-record outcome row written by a scan. */
+export interface ScanResult {
+  id: number;
+  scan_job_id: number;
+  source_key: string;
+  status: string;
+  title: string;
+  record_type: string;
+  category: string | null;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number;
+  sensitivity: string;
+  contains_personal_data: boolean;
+  imported_asset_id: number | null;
+  note: string | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+/** `PaginatedScanResults` for `GET /scan-jobs/{id}/results`. */
+export interface ScanResultListResponse {
+  items: ScanResult[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
+}
+
+/** `ScanErrorRead`: one error or truncation warning recorded by a scan. */
+export interface ScanError {
+  id: number;
+  scan_job_id: number;
+  source_key: string | null;
+  /** Root-relative POSIX path when the connector could name one; never absolute. */
+  path: string | null;
+  error_message: string;
+  severity: string;
+  created_at: string;
+}
+
+/** `PaginatedScanErrors` for `GET /scan-jobs/{id}/errors`. */
+export interface ScanErrorListResponse {
+  items: ScanError[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
+}
+
 /* ------------------------- authentication (Phase 7) ------------------------ */
 // Mirrors backend/app/api/schemas/auth.py (ADR-0014). Authorization is always
 // derived server-side from the local user directory; the permissions below are
@@ -552,13 +788,17 @@ export interface AuthConfig {
   environment: string;
   /**
    * - `development` — local dev sign-in is available (never in production).
+   * - `clerk` — session tokens come from Clerk and are verified here with
+   *   RS256; sign-in happens at Clerk, so this API exposes no sign-in form.
    * - `bearer_boundary` — tokens are verified, but no identity provider or
    *   browser sign-in is configured.
    * - `unconfigured` — protected endpoints return 503 until an operator
    *   configures the signing secret.
    */
-  authentication: "development" | "bearer_boundary" | "unconfigured";
+  authentication: "development" | "clerk" | "bearer_boundary" | "unconfigured";
   dev_login_enabled: boolean;
+  /** Which identity provider the server trusts: `clerk`, `local`, or none. */
+  identity_provider: "clerk" | "local" | "none";
   issuer: string;
   audience: string;
   token_ttl_seconds: number;

@@ -3,6 +3,32 @@
 Development infrastructure for DataDiet. Production deployment is described in
 `docs/architecture.md`; the Nginx config here is a starting point only.
 
+| Path | What it is |
+| --- | --- |
+| `docker-compose.dev.yml` | Development MySQL + optional Nginx edge profile |
+| `nginx/nginx.conf` | Future self-hosted edge placeholder (not used by the Azure shape) |
+| `azure/` | Bicep templates for a future Azure deployment — **written, never deployed, never compiled** |
+| `floci/` | Floci-AZ (Azure emulator) on Render: feasibility record + a drafted private-service definition — **prepared, never deployed, never run** |
+
+## Azure
+
+`azure/` is the infrastructure-as-code scaffolding for a planned Azure target
+(Static Web Apps + App Service Linux + MySQL Flexible Server + Key Vault). Start
+with `azure/README.md` for the layout, naming, cost categories, validation
+commands, and the table of assumptions that still need Azure access to resolve;
+`docs/azure-architecture.md`, `docs/azure-deployment.md`, and
+`docs/azure-cutover-checklist.md` carry the design, runbook, and gate. Nothing
+in it has been deployed, and it creates no cloud resources by itself.
+
+## Floci-AZ emulator (Render)
+
+`floci/` records what it would take to host the Floci-AZ Azure emulator as a
+Render service for the backend to call. Read `floci/README.md` for the
+compatibility matrix, the persistence and security risks, and the verification
+checklist; `floci/render.yaml` is the drafted definition of the emulator as a
+Render **private** service. Nothing here is wired into DataDiet — the application
+uses no Azure storage API yet — and nothing has been deployed or run.
+
 ## Docker Compose (development)
 
 `docker-compose.dev.yml` provides:

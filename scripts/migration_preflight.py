@@ -12,8 +12,13 @@ anything:
   ``0011_platform_admin_default_false`` -- the correction that resets
   ``is_platform_admin`` for every account (ADR-0017) -- or the forward audit
   record ``0012_audit_platform_admin_reset`` (ADR-0020).
-* whether the target is MySQL. SQLite and other dialects are rejected with exit
-  code 6 rather than reported as a valid migration target.
+* whether the target is a supported dialect. MySQL and PostgreSQL are (ADR-0025);
+  SQLite and other dialects are rejected with exit code 6 rather than reported as
+  a valid migration target.
+
+On a PostgreSQL target that still has ``0013_postgresql_baseline`` pending, the
+report adds the entry path (``stamp 0012`` first, then ``upgrade head``), because
+the earlier revisions carry MySQL-only DDL and cannot be replayed there.
 
 The script never calls Alembic upgrade/downgrade and never writes SQL. A
 verified backup and a documented administrator recovery plan stay human gates;
@@ -33,7 +38,8 @@ Exit codes::
        ambiguous
     4  the stamped revision is not part of this repository's history
     5  repository history is ambiguous (multiple heads)
-    6  unsupported database dialect (only MySQL is a valid migration target)
+    6  unsupported database dialect (only MySQL and PostgreSQL are valid
+       migration targets)
 """
 
 from __future__ import annotations
@@ -60,6 +66,20 @@ from app.core.config import get_settings  # noqa: E402
 #: Revision that removes every accidental platform-admin grant (ADR-0017).
 ADMIN_RESET_REVISION = "0011_platform_admin_default_false"
 
+#: Revision that establishes the schema on PostgreSQL (ADR-0025). A target that
+#: still has it pending is a fresh PostgreSQL database, and the revisions before
+#: it cannot be replayed there.
+POSTGRES_BASELINE_REVISION = "0013_postgresql_baseline"
+
+#: Revision a fresh PostgreSQL database is stamped at before ``0013`` is applied.
+#: It is the baseline's ``down_revision`` -- the point in the MySQL history whose
+#: schema the baseline reproduces.
+POSTGRES_BASELINE_PARENT = "0012_audit_platform_admin_reset"
+
+#: Dialects the Alembic history is written and tested for. SQLite is a unit-test
+#: convenience, never a deployment target.
+SUPPORTED_BACKENDS = frozenset({"mysql", "postgresql"})
+
 _DEFAULT_MIGRATIONS_DIR = _REPO_ROOT / "database" / "migrations"
 
 
@@ -78,11 +98,22 @@ class PreflightResult:
     current_revision: str
     head_revision: str
     pending: tuple[str, ...]
+    #: The target's SQLAlchemy backend name, e.g. ``mysql`` or ``postgresql``.
+    dialect: str = ""
 
     @property
     def includes_admin_reset(self) -> bool:
         """Whether applying the pending revisions includes the 0011 reset."""
         return ADMIN_RESET_REVISION in self.pending
+
+    @property
+    def needs_postgres_baseline(self) -> bool:
+        """Whether a PostgreSQL target still has the ``0013`` baseline to apply.
+
+        True only for the dialect where that revision does work: on MySQL ``0013``
+        is a no-op branch, so listing it as pending is not a warning there.
+        """
+        return self.dialect == "postgresql" and POSTGRES_BASELINE_REVISION in self.pending
 
 
 def masked_target(database_url: str) -> str:
@@ -106,13 +137,14 @@ def load_script_directory(migrations_dir: Path | None = None) -> ScriptDirectory
     return ScriptDirectory.from_config(config)
 
 
-def _require_mysql(database_url: str) -> None:
-    """Refuse any target that is not a MySQL database.
+def _require_supported_dialect(database_url: str) -> str:
+    """Return the target's backend name, or refuse a dialect with no tested history.
 
-    SQLite and other engines are useful in unit tests, but Alembic's production
-    history in this repository is supported only on MySQL (``docs/setup.md``
-    section 8). Accepting any other dialect would let the preflight report a
-    clean result for a target the migrations were never tested against.
+    MySQL is the dialect the original history was written for; PostgreSQL became
+    a supported target with ADR-0025, through the ``0013`` baseline branch. SQLite
+    and other engines are useful in unit tests, but accepting any dialect would
+    let the preflight report a clean result for a target the migrations were never
+    tested against.
     """
     try:
         url = make_url(database_url)
@@ -121,12 +153,13 @@ def _require_mysql(database_url: str) -> None:
             2, "the configured DATABASE_URL cannot be parsed"
         ) from exc
     backend = url.get_backend_name()
-    if backend != "mysql":
+    if backend not in SUPPORTED_BACKENDS:
         raise PreflightError(
             6,
-            f"unsupported database dialect {backend!r}; only MySQL is a supported "
-            "migration target",
+            f"unsupported database dialect {backend!r}; only "
+            f"{', '.join(sorted(SUPPORTED_BACKENDS))} are supported migration targets",
         )
+    return backend
 
 
 def _safe_detail(exc: BaseException, database_url: str) -> str:
@@ -152,7 +185,7 @@ def _safe_detail(exc: BaseException, database_url: str) -> str:
 
 def _read_stamped_revision(database_url: str) -> str:
     """Return the single revision stamped in ``alembic_version``."""
-    _require_mysql(database_url)
+    _require_supported_dialect(database_url)
     try:
         engine = create_engine(database_url)
     except (SQLAlchemyError, OSError, ValueError, ImportError) as exc:
@@ -203,9 +236,10 @@ def assess(
     """Read the target's stamped revision and compare it with this checkout.
 
     ``revision_reader`` exists for isolated unit tests. Production callers pass
-    only the URL; the reader is still protected by :func:`_require_mysql`.
+    only the URL; the reader is still protected by
+    :func:`_require_supported_dialect`.
     """
-    _require_mysql(database_url)
+    dialect = _require_supported_dialect(database_url)
     script = script_directory or load_script_directory()
     heads = script.get_heads()
     if len(heads) != 1:
@@ -215,7 +249,9 @@ def assess(
     reader = revision_reader or _read_stamped_revision
     current = reader(database_url)
     if current == head:
-        return PreflightResult(current_revision=current, head_revision=head, pending=())
+        return PreflightResult(
+            current_revision=current, head_revision=head, pending=(), dialect=dialect
+        )
 
     try:
         script.get_revision(current)
@@ -241,6 +277,7 @@ def assess(
         current_revision=current,
         head_revision=head,
         pending=tuple(reversed(pending)),
+        dialect=dialect,
     )
 
 
@@ -273,6 +310,7 @@ def main() -> int:
         return 1
 
     print(f"  Current     : {result.current_revision}")
+    print(f"  Dialect     : {result.dialect}")
     print(f"  Head        : {result.head_revision}")
     if not result.pending:
         print("  Pending     : (none)")
@@ -283,6 +321,14 @@ def main() -> int:
     print()
     print("Result: migrations are pending. Before applying them, verify a backup and")
     print("a documented administrator recovery plan (docs/setup.md migration runbook).")
+    if result.needs_postgres_baseline:
+        print()
+        print("NOTE: this is a PostgreSQL target and 0013_postgresql_baseline is still")
+        print("pending, so revisions 0001-0012 have not been applied here. They carry")
+        print("MySQL-only DDL and cannot be replayed on PostgreSQL. A fresh PostgreSQL")
+        print("database enters the history at the revision 0013 replaces: run")
+        print(f"'alembic stamp {POSTGRES_BASELINE_PARENT}' then 'alembic upgrade head'.")
+        print("Never upgrade from 0001 on PostgreSQL.")
     if result.includes_admin_reset:
         print()
         print("WARNING: 0011_platform_admin_default_false sets is_platform_admin to")

@@ -1,24 +1,16 @@
-import type { Tone } from "../../lib/labels";
+import { resolveTone, type ToneInput } from "../../lib/semantic";
+import { TONE_SOLID } from "./statusClasses";
 
 export interface BarItem {
   label: string;
   value: number;
-  tone?: Tone;
+  tone?: ToneInput;
 }
-
-const TONE_FILL: Record<Tone, string> = {
-  slate: "bg-slate-400",
-  indigo: "bg-indigo-500",
-  emerald: "bg-emerald-500",
-  sky: "bg-sky-500",
-  amber: "bg-amber-500",
-  orange: "bg-orange-500",
-  rose: "bg-rose-500",
-};
 
 /**
  * Dependency-free horizontal bar list — keeps the bundle small while giving
- * the dashboard readable distribution charts.
+ * the dashboard readable distribution charts. `tone` takes a semantic role; the
+ * legacy palette names are resolved onto a role by `resolveTone`.
  */
 export function BarList({ items, unit = "" }: { items: BarItem[]; unit?: string }) {
   const max = items.reduce((highest, item) => Math.max(highest, item.value), 0);
@@ -29,16 +21,16 @@ export function BarList({ items, unit = "" }: { items: BarItem[]; unit?: string 
         const width = max === 0 ? 0 : Math.max((item.value / max) * 100, item.value > 0 ? 4 : 0);
         return (
           <li key={item.label}>
-            <div className="flex items-baseline justify-between gap-3 text-sm">
-              <span className="text-slate-600">{item.label}</span>
-              <span className="font-medium text-slate-900 tabular-nums">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-body text-ink-muted">{item.label}</span>
+              <span className="text-data font-medium text-ink tabular-nums">
                 {item.value}
                 {unit}
               </span>
             </div>
-            <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+            <div className="mt-1.5 h-2 w-full overflow-hidden rounded-pill bg-surface-sunken">
               <div
-                className={`h-full rounded-full ${TONE_FILL[item.tone ?? "indigo"]}`}
+                className={`h-full rounded-pill ${TONE_SOLID[resolveTone(item.tone ?? "accent")]}`}
                 style={{ width: `${width}%` }}
                 role="presentation"
               />

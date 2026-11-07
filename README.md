@@ -14,7 +14,9 @@ ever deleting data automatically.
 > provider is implemented. The remaining production blockers are tracked in
 > `docs/production-readiness.md`. Every figure shown in the UI is explicitly
 > labeled synthetic demo data. See `docs/architecture.md` for the
-> capability-by-capability status.
+> capability-by-capability status. Phase 10 added Azure *preparation* only —
+> Bicep templates, a separate deployment workflow, and runbooks that have never
+> been compiled, validated, or deployed (`docs/azure-architecture.md`).
 
 ## Stack
 
@@ -33,8 +35,8 @@ DataDiet/
 ├── frontend/   React + TypeScript + Tailwind (Vite)
 ├── backend/    FastAPI app (api / services / db layers) + tests
 ├── database/   Alembic migrations (schema authority) and docs
-├── infra/      docker-compose.dev.yml + future Nginx configuration
-├── docs/       architecture, setup, decisions, backup/restore, production readiness
+├── infra/      docker-compose.dev.yml + Nginx placeholder + azure/ (Bicep scaffolding)
+├── docs/       architecture, setup, decisions, backup/restore, production readiness, azure-*
 ├── scripts/    validation gate + operator scripts (preflight, admin recovery)
 ├── .github/    GitHub Actions CI workflow
 ├── .env.example
@@ -99,6 +101,13 @@ requests and pushes to `main` on Linux, plus the disposable MySQL migration
 suite. It has not yet executed on GitHub. See `docs/setup.md` and
 `docs/production-readiness.md`.
 
+`.github/workflows/azure-deploy.yml` is separate scaffolding for a future Azure
+deployment: `workflow_dispatch` only, GitHub OIDC with no repository secret,
+build and deploy in separate jobs, production behind a protected environment,
+read-only smoke checks, and no Alembic. It has never run, its Bicep templates
+have never been compiled, and it must not be enabled until the blockers in
+`docs/azure-architecture.md` section 1.3 are resolved.
+
 ## Safety principles (non-negotiable)
 
 1. **No automatic deletion, ever.** Disposal requires documented policy
@@ -128,7 +137,10 @@ suite. It has not yet executed on GitHub. See `docs/setup.md` and
 | `docs/decisions.md` | Decision records, including the risk rule table |
 | `docs/backup-restore.md` | Backup, integrity, scratch restore, approval, and drill record |
 | `docs/production-readiness.md` | Production blockers and the ordered deployment gate |
+| `docs/azure-architecture.md` | Azure migration gap analysis, target design, configuration contract, cost categories |
+| `docs/azure-deployment.md` | Azure runbook: permissions, provisioning, secrets, database, migrations, rollback |
+| `docs/azure-cutover-checklist.md` | The gate list that must be satisfied before a cutover is called done |
 | `database/README.md` | Migration workflow and development MySQL details |
-| `infra/README.md` | Docker Compose and Nginx usage |
+| `infra/README.md` | Docker Compose, Nginx, and the Azure template directory |
 
 License: proprietary (placeholder — update for your institution).

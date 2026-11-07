@@ -25,6 +25,14 @@ Copy-Item .env.example .env
 `.env` is git-ignored. Never commit real credentials. The default development
 values match `infra/docker-compose.dev.yml`.
 
+`CORS_ORIGINS` accepts either a comma-separated list or a JSON array
+(`backend/app/core/config.py`, ADR-0021); the comma form is the portable one for
+deployed platforms, whose application settings can only hold flat strings.
+`LOCAL_SOURCE_ROOTS` is a dict field and must therefore stay JSON.
+`API_HOST`/`API_PORT`/`MYSQL_*` are not read by the application — see
+`docs/azure-architecture.md` section 5 for the complete list of keys the code
+actually consumes and where each comes from in a deployed environment.
+
 ## 2. Backend (FastAPI)
 
 ```powershell
@@ -63,7 +71,7 @@ npm run dev
 Open http://localhost:5173. The dev server proxies `/api` to
 `http://localhost:8000`, so leave `VITE_API_BASE_URL` empty in `.env`.
 
-## 4. Database (MySQL, optional in Phase 1)
+## 4. Database (MySQL or PostgreSQL, optional in Phase 1)
 
 Requires Docker Desktop:
 
@@ -78,38 +86,77 @@ Set-Location backend
 ..\.venv\Scripts\alembic.exe current
 ```
 
-Expected result: `0012_audit_platform_admin_reset` (head). Without Docker,
+Expected result: `0014_external_identities` (the single head). Without Docker,
 skip this section — the application still runs and reports the database as
 unreachable.
 
+**PostgreSQL (ADR-0025).** `DATABASE_URL` accepts
+`postgresql+psycopg2://user:password@host:5432/dbname` as well as the MySQL URL
+above. A *fresh* PostgreSQL database does not replay `0001`–`0012` — that history
+is MySQL-shaped and PostgreSQL rejects parts of it — it enters at the `0013`
+baseline instead:
+
+```powershell
+Set-Location backend
+..\.venv\Scripts\python.exe ..\scripts\migration_preflight.py   # read-only; confirms dialect + pending
+..\.venv\Scripts\alembic.exe stamp 0012_audit_platform_admin_reset
+..\.venv\Scripts\alembic.exe upgrade head
+..\.venv\Scripts\alembic.exe current
+```
+
+Never stamp or upgrade a database that already has tables: `stamp` only writes the
+revision row. An existing MySQL database needs nothing new — `0013` detects the
+dialect and does nothing, so `upgrade head` there applies only
+`0014_external_identities`. `0013_postgresql_baseline` is forward-only: its
+downgrade refuses to run rather than drop a baseline. The development/test helper
+`pgserver` starts a disposable local PostgreSQL for
+`tests/test_migrations_postgresql.py`; it is in `requirements-dev.txt` only, and
+those tests skip with a stated reason when it is unavailable. SQLite is not a
+supported target and is never used as evidence of PostgreSQL behaviour.
+
 Supported rollback boundary: **`0005_source_connectors`** — do not
 `alembic downgrade` below it (ADR-0016 explains the safe failure mode and the
-repair procedure if you do).
+repair procedure if you do). The boundary is MySQL-only: on PostgreSQL nothing
+below `0013_postgresql_baseline` can be reversed (ADR-0025).
 
 Applying migrations to an **existing** database is a privileged operation —
 especially `0011`, which resets every platform-admin flag. Follow the migration
 runbook in section 8 instead of running `upgrade head` directly, and take a
 test-restored backup first (`docs/backup-restore.md`).
 
-## 5. Signing in (Phase 7)
+## 5. Signing in (Phase 7; Clerk added in Phase 6.0)
 
 Every endpoint except `/api/v1/health` and `/api/v1/auth/config` requires a
-signed bearer token (ADR-0014). How you get one depends on the deployment:
+signed bearer token (ADR-0014). How you get one depends on the deployment, and
+`GET /api/v1/auth/config` reports which mode this deployment actually is in — the
+sign-in page never offers a credential path the server would refuse:
 
-- **Development (default):** open http://localhost:5173 and use the
+- **Clerk (the staging/production path, ADR-0025):** when `CLERK_ISSUER` is set,
+  session tokens are RS256 and are verified against Clerk's published JWKS. The
+  frontend renders Clerk's own sign-in component (it must be built with
+  `VITE_CLERK_PUBLISHABLE_KEY`; see `.env.example`) and sends a Clerk session
+  token per request; DataDiet stores no password and no copy of that token.
+  A Clerk identity grants nothing until an operator binds it to an account:
+  `python ..\scripts\bind_clerk_identity.py bind --subject <clerk user id> --email
+  <account email> --actor "ops:your-name"`. An unbound identity is refused with
+  `unknown_account`, and the page shows that refusal rather than a session.
+- **Development (default, local only):** open http://localhost:5173 and use the
   *Development sign-in* form on `/signin`. It calls `POST /api/v1/auth/dev-login`,
   which creates/reuses a synthetic local account and issues a real HS256 token
   through the same verification path as every other token. This is explicitly
-  **not** production authentication and is hard-disabled when
-  `ENVIRONMENT=production` (503 `sign_in_unavailable:`).
+  **not** production authentication. In `ENVIRONMENT=staging|production` the
+  route is not registered at all, so it answers 404 and is absent from the OpenAPI
+  schema; the handler additionally refuses with 503 `sign_in_unavailable:` if it
+  is ever reached, and it refuses the same way whenever `CLERK_ISSUER` is
+  configured — Clerk always wins.
 - **Bearer boundary:** paste an externally issued token (HS256, your
   `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` claims, a `sub` or `email` matching a
-  local account). The sign-in page shows the exact contract from
-  `/api/v1/auth/config`.
+  local account). Available when no identity provider is configured and a real
+  signing secret exists.
 - **Unconfigured:** the page says authentication is not configured instead of
-  showing a form. In production this is the state until an operator sets a real
-  `AUTH_JWT_SECRET` — every protected endpoint then returns 503
-  `auth_not_configured:` (fail closed by design).
+  showing a form. In a protected environment this is the state until an operator
+  configures Clerk or sets a real `AUTH_JWT_SECRET` — every protected endpoint
+  then returns 503 `auth_not_configured:` (fail closed by design).
 
 Create the first platform administrator offline (there is no HTTP bootstrap):
 
@@ -120,12 +167,15 @@ Set-Location C:\Users\yadav\Desktop\DataDiet\backend
 
 The same command is the audited recovery path after migration `0011` resets
 existing platform-admin flags (see section 8.4). It promotes exactly the named
-account and never mass-grants.
+account and never mass-grants. Under Clerk the order matters: create and configure
+the account first, then bind its Clerk subject — binding grants nothing, and no
+HTTP route can create an account or grant `platform_admin`.
 
 Authorization (roles, institution scope) always comes from the local user
-directory, never from token claims. Sign-out is client-side: the token is
-discarded from `localStorage` (bearer tokens are stateless; there is no logout
-endpoint).
+directory, never from token claims and never from identity-provider metadata.
+Sign-out is client-side: the token is discarded from `localStorage` (bearer tokens
+are stateless; there is no logout endpoint), and when Clerk is mounted the
+provider's own browser session is ended through Clerk's supported sign-out.
 
 ## 6. Run the checks
 
@@ -133,7 +183,7 @@ Backend:
 
 ```powershell
 Set-Location C:\Users\yadav\Desktop\DataDiet\backend
-..\.venv\Scripts\python.exe -m pytest              # backend tests; some skip without MySQL
+..\.venv\Scripts\python.exe -m pytest              # 360 tests; 20 skip without a live MySQL
 ..\.venv\Scripts\python.exe -m ruff check .         # backend lint
 ..\.venv\Scripts\python.exe -m ruff check ..\scripts  # operator scripts (same Ruff config)
 
@@ -143,6 +193,12 @@ Set-Location C:\Users\yadav\Desktop\DataDiet\backend
 # $env:MIGRATION_TEST_ALLOW_DROP = "1"
 # $env:MIGRATION_TEST_DB_URL = "mysql+pymysql://root:@127.0.0.1:3307/datadiet_mig"
 # ..\.venv\Scripts\python.exe -m pytest tests/test_migrations_mysql.py     # 19 tests
+
+# The PostgreSQL migration tests need no server and no opt-in: they start a
+# disposable instance through the `pgserver` dev dependency (loopback only) and
+# skip with a stated reason if it is not installed. Never a substitute for the
+# MySQL suite, and SQLite is never treated as evidence of PostgreSQL behaviour.
+# ..\.venv\Scripts\python.exe -m pytest tests/test_migrations_postgresql.py  # 10 tests
 ```
 
 Frontend:
@@ -150,9 +206,20 @@ Frontend:
 ```powershell
 Set-Location C:\Users\yadav\Desktop\DataDiet\frontend
 npm run typecheck     # tsc strict, no emit
-npm test              # vitest run, 80 tests
+npm test              # vitest run — 507 tests in 32 files
 npm run build         # production bundle into dist/
 ```
+
+`npm test` pins `--pool=forks --poolOptions.forks.maxForks=4`, and the pin is
+part of the gate, not a preference. Measured on 2026-11-04 with the full 507-test
+suite: the stable configuration passes 507/507 (exit 0) reproducibly, while
+Vitest's default pool fails a shifting set of 5–6 tests (exit 1) with `Test
+timed out in 5000ms` and Testing Library's 1 s `findBy` timeouts — the machine is
+oversubscribed by one fork per core while jsdom and `userEvent` still need the
+event loop. Same tests, same code, different worker count. The assertion timeout
+was **not** raised and no test was skipped or reordered: the fix is the worker
+count. If a future suite still cannot run four forks without contention, lower
+`maxForks` rather than lengthening timeouts.
 
 Everything from the repository root:
 
@@ -197,7 +264,22 @@ its local equivalents were run, but the GitHub-hosted Linux job and its
 environment. Remote execution requires a push or pull request.
 
 Production blockers are tracked in `docs/production-readiness.md`. Backups and
-restore drills are in `docs/backup-restore.md`.
+restore drills are in `docs/backup-restore.md`. The prepared-but-undeployed
+Render staging runbook (Clerk configuration, PostgreSQL entry path, secret
+placement, human-triggered migrations, privacy options and its validation gate)
+is `docs/render-staging.md`.
+
+A second workflow, `.github/workflows/azure-deploy.yml`, is scaffolding for a
+future Azure deployment. It is deliberately not part of this developer loop: it
+triggers only on `workflow_dispatch`, needs Azure-side configuration (OIDC
+federation plus per-environment variables) that does not exist yet, validates
+the Bicep templates offline, separates build from deploy, requires a protected
+GitHub environment for production, runs read-only smoke checks only, and never
+runs Alembic. It has never executed and its actions are pinned to version tags
+rather than commit SHAs, which does **not** meet the convention described above
+(ADR-0019) and must be fixed before it is enabled. See
+`docs/azure-deployment.md` section 1.2 for what it needs, and
+`docs/azure-architecture.md` section 1.3 for the blockers.
 
 ## 7. Creating a new migration
 
@@ -221,11 +303,16 @@ on every existing account** (ADR-0017). Forward migration
 post-reset administrator count; it changes no account or privilege (ADR-0020).
 Treat applying them as a privileged change, not a routine startup step.
 
-Supported engine: MySQL 8.x. The development compose file pins `mysql:8.4`.
-The live migration suite passed 19/19 on MySQL 8.0.46 locally; CI is configured
-to use `mysql:8.4` but has not run on GitHub. The Alembic chain is only
-exercised on MySQL; do not run it against another engine. The preflight rejects
-non-MySQL dialects with exit code 6.
+Supported engines: **MySQL 8.x** and **PostgreSQL** (ADR-0025). The development
+compose file pins `mysql:8.4`. The live migration suite passed 19/19 on MySQL
+8.0.46 locally; CI is configured to use `mysql:8.4` but has not run on GitHub.
+The PostgreSQL chain is exercised by `tests/test_migrations_postgresql.py`
+against a real `pgserver` instance (10 tests), not by the MySQL suite and not by
+SQLite. A database on either engine enters the history at its own revision:
+PostgreSQL needs the `0013_postgresql_baseline` entry path in section 4 (stamp
+`0012_audit_platform_admin_reset`, then `upgrade head`) because `0001`–`0012`
+cannot be replayed there, and `0013` is a no-op on MySQL. The preflight reports
+the dialect and rejects any other engine with exit code 6.
 
 ### 8.1 Preflight (read-only)
 
@@ -244,8 +331,9 @@ Exit codes: `0` expected state (at head, or on-chain with pending migrations);
 `1` unexpected internal error; `2` database unreachable or URL unusable; `3`
 not under Alembic control (`alembic_version` missing, empty or ambiguous); `4`
 stamped revision not in this repository; `5` ambiguous repository history
-(multiple heads); `6` unsupported database dialect (only MySQL is a valid
-migration target). **Any non-zero code: stop and fix the cause.**
+(multiple heads); `6` unsupported database dialect (only MySQL and PostgreSQL are
+valid migration targets, and the check runs before any connection is made).
+**Any non-zero code: stop and fix the cause.**
 
 Do not continue unless all of the following are true:
 

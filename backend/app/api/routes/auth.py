@@ -1,22 +1,30 @@
-"""Authentication endpoints (Phase 7, ADR-0014).
+"""Authentication endpoints (Phase 7, extended by Clerk in Phase 6.0).
 
-There are three surfaces:
+There are four surfaces:
 
 ``GET  /auth/config``   Public. Reports what kind of authentication this
                         deployment actually has, so the frontend never claims
                         single sign-on exists when it does not.
-``POST /auth/dev-login`` Development/test only. Creates or reuses a *synthetic*
-                        local account and issues a real, signed HS256 bearer
-                        token. It is forcibly disabled in production, so
-                        development identity can never become production
-                        authentication.
 ``GET  /auth/me``       Returns the verified identity, institution scope, and
-                        permissions derived from the local directory.
+                        permissions derived from the local directory. Works
+                        identically for a Clerk session token and for a
+                        development token: everything after verification is the
+                        same directory lookup.
+``router``              The two routes above. Always registered.
+``dev_router``          ``POST /auth/dev-login`` — the development/test provider
+                        only. ``create_app`` registers it *conditionally*, so in
+                        a staging or production deployment the route does not
+                        exist (404 from the router) rather than being a button
+                        that is hidden; the handler still re-checks, so an
+                        accidentally-registered route cannot be used either.
 
-There is deliberately **no** logout endpoint: bearer tokens are stateless, so
-sign-out is discarding the token client-side. There is also no password
-anywhere in this module — DataDiet stores no credentials at all, only a
-directory of accounts that a token's verified subject maps onto.
+A Clerk-authenticated caller brings their own session token, issued by Clerk's
+own SDK rather than by this API, so there is deliberately **no** sign-in,
+callback, or token-exchange endpoint for Clerk here. There is likewise no logout
+endpoint: bearer tokens are stateless, so sign-out is discarding the token
+client-side (Clerk's SDK ends the browser session on the frontend). There is no
+password anywhere in this module — DataDiet stores no credentials at all, only a
+directory of accounts that a verified subject maps onto.
 """
 
 from __future__ import annotations
@@ -32,7 +40,9 @@ from app.api.schemas.auth import (
     UserProfile,
 )
 from app.core.auth import (
+    PROVIDER_LOCAL,
     CurrentUser,
+    bearer_boundary_secret,
     build_current_user,
     get_current_user,
     require_auth_configured,
@@ -43,7 +53,14 @@ from app.db.models import AppUser, Institution, UserMembership
 from app.db.session import get_db
 from app.services.audit import record_event
 
+#: Always registered. ``/auth/me`` answers for both providers, which is the
+#: point: authorization never depends on which identity provider was used.
 router = APIRouter(prefix="/auth")
+
+#: Registered only outside staging and production, and it refuses its own
+#: requests whenever a Clerk issuer is configured (such a token could not be
+#: verified, so issuing one would be a trap).
+dev_router = APIRouter(prefix="/auth")
 
 
 def _profile(current: CurrentUser) -> UserProfile:
@@ -64,7 +81,8 @@ def _unconfigured() -> HTTPException:
         detail=(
             "sign_in_unavailable: Single sign-on is not configured for this "
             "deployment: no identity provider is wired up, and there is no "
-            "local sign-in outside development. See docs/decisions.md ADR-0014."
+            "local sign-in outside development. See docs/decisions.md ADR-0014 "
+            "and ADR-0025."
         ),
     )
 
@@ -73,59 +91,106 @@ def _unconfigured() -> HTTPException:
 def auth_config() -> AuthConfig:
     """Public on purpose: it exposes no secret and lets the UI tell the truth."""
     settings = get_settings()
+    # A Clerk-configured deployment verifies RS256 only, so an HS256 token from
+    # the development provider would be minted and then refused. Reporting the
+    # provider as available in that state would be a lie the UI then believes.
     dev_enabled = (
-        settings.environment != "production"
+        not settings.protected_environment
         and settings.auth_dev_provider_enabled
         and bool(settings.auth_jwt_secret)
+        and not settings.clerk_enabled
     )
-    if dev_enabled:
-        authentication: str = "development"
+
+    if settings.clerk_enabled:
+        authentication: str = "clerk"
+        identity_provider = "clerk"
+        issuer = settings.clerk_issuer
+        audience = settings.clerk_audience
+        description = (
+            "Session tokens are issued by Clerk and verified here with RS256 "
+            "against Clerk's published keys. Sign in through Clerk; this API "
+            "issues no tokens. A Clerk identity must already be linked to a "
+            "DataDiet account to see anything."
+        )
+    elif dev_enabled:
+        # Only true outside staging and production: a protected environment
+        # forces the provider off in settings construction and never registers
+        # the route.
+        authentication = "development"
+        identity_provider = "local"
+        issuer = settings.auth_jwt_issuer
+        audience = settings.auth_jwt_audience
         description = (
             "Development sign-in is available. It issues local tokens for "
-            "synthetic accounts and is disabled in production."
+            "synthetic accounts and is disabled in staging and production."
         )
-    elif settings.environment == "production" and settings.auth_jwt_secret:
+    elif bearer_boundary_secret(settings):
+        # ADR-0014's bearer boundary: reached in a protected environment that
+        # carries its own signing secret, and in development/test when the
+        # provider is switched off but a real secret is configured.
         authentication = "bearer_boundary"
+        identity_provider = "local"
+        issuer = settings.auth_jwt_issuer
+        audience = settings.auth_jwt_audience
         description = (
             "Bearer-token verification is configured, but this application does "
-            "not yet implement the browser sign-in redirect: an external "
-            "identity provider must issue tokens."
+            "not implement the browser sign-in redirect: an external identity "
+            "provider must issue tokens."
         )
     else:
         authentication = "unconfigured"
+        identity_provider = "none"
+        issuer = "" if settings.protected_environment else settings.auth_jwt_issuer
+        audience = "" if settings.protected_environment else settings.auth_jwt_audience
         description = (
             "Authentication is not configured. Every protected endpoint is "
-            "unavailable (HTTP 503) until AUTH_JWT_SECRET is set."
+            "unavailable (HTTP 503) until a Clerk issuer or a signing secret is "
+            "set, and the development sign-in route is not registered in "
+            "staging and production."
         )
     return AuthConfig(
         environment=settings.environment,
         authentication=authentication,
         dev_login_enabled=dev_enabled,
-        issuer=settings.auth_jwt_issuer,
-        audience=settings.auth_jwt_audience,
+        identity_provider=identity_provider,
+        issuer=issuer,
+        audience=audience,
         token_ttl_seconds=settings.auth_token_ttl_seconds,
         description=description,
     )
 
 
-@router.post(
+@router.get("/me", response_model=UserProfile, summary="The verified caller")
+def me(current: CurrentUser = Depends(get_current_user)) -> UserProfile:
+    return _profile(current)
+
+
+@dev_router.post(
     "/dev-login",
     response_model=TokenResponse,
-    summary="Development sign-in (never available in production)",
+    summary="Development sign-in (never registered in staging or production)",
 )
 def dev_login(data: DevLoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     """Issue a real bearer token for a synthetic development account.
 
     The token goes through exactly the same verification path as any other
-    request — there is no bypass — so development exercises production
-    authentication rather than a parallel mechanism.
+    request — there is no bypass — so development exercises the real
+    authentication code rather than a parallel mechanism.
+
+    Two independent guards protect this. ``create_app`` does not register the
+    route at all in a protected environment, and this handler refuses before
+    touching the database even if the route somehow exists. In particular it
+    does not create an audit row whose actor/entity are attacker-controlled
+    input: a public unauthenticated request must not be able to write to the
+    audit log.
     """
     require_auth_configured()
     settings = get_settings()
-    if settings.environment == "production" or not settings.auth_dev_provider_enabled:
-        # Refuse before touching the database. In particular, do not create an
-        # audit row whose actor/entity are attacker-controlled input: a public
-        # unauthenticated request must not be able to write to the audit log.
+    if (
+        settings.protected_environment
+        or not settings.auth_dev_provider_enabled
+        or settings.clerk_enabled
+    ):
         raise _unconfigured()
 
     if data.institution_id is not None and db.get(Institution, data.institution_id) is None:
@@ -183,7 +248,7 @@ def dev_login(data: DevLoginRequest, db: Session = Depends(get_db)) -> TokenResp
     db.commit()
     db.refresh(user)
 
-    claims = build_current_user(db, {"sub": str(user.id)})
+    claims = build_current_user(db, {"sub": str(user.id)}, provider=PROVIDER_LOCAL)
     token = issue_token(
         subject=str(user.id),
         issuer=settings.auth_jwt_issuer,
@@ -213,8 +278,3 @@ def dev_login(data: DevLoginRequest, db: Session = Depends(get_db)) -> TokenResp
         expires_in=settings.auth_token_ttl_seconds,
         user=_profile(claims),
     )
-
-
-@router.get("/me", response_model=UserProfile, summary="The verified caller")
-def me(current: CurrentUser = Depends(get_current_user)) -> UserProfile:
-    return _profile(current)

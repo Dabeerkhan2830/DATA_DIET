@@ -1,10 +1,270 @@
 @import "tailwindcss";
 
-/* Design tokens — institutional slate palette with indigo accent. */
+/* ---------------------------------------------------------------------------
+ * Typography — self-hosted Inter.
+ *
+ * The four weights the design system uses (400/500/600/700), latin subset, are
+ * bundled in `src/assets/fonts/` and emitted as build assets by Vite: the
+ * browser never contacts a font CDN at runtime, so the app renders identically
+ * offline and no third-party request is made from a page. The files are the
+ * pinned `@fontsource/inter@5.3.0` latin web-fonts, shipped with their SIL Open
+ * Font License text in the same directory. The stack keeps system faces as
+ * fallbacks for glyphs outside the latin subset and for the moment before the
+ * file loads (`font-display: swap`).
+ * ------------------------------------------------------------------------ */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-400-normal.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-500-normal.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-600-normal.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-700-normal.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ---------------------------------------------------------------------------
+ * Design tokens — "Institutional Intelligence".
+ *
+ * Feature code consumes these semantic roles (`bg-surface`, `text-ink-muted`,
+ * `border-line`, `rounded-card`, `text-section`, `shadow-card`) instead of raw
+ * palette steps (`bg-slate-50`, `text-slate-500`). Tailwind's default palette
+ * stays available, so untouched pages keep rendering while they are migrated.
+ * Pages not yet migrated still carry raw palette classes; the primitives in
+ * `components/ui/` are the first consumers of the control and overlay tokens
+ * below, and page adoption is a later, per-route phase.
+ *
+ * Single light theme: dark mode is deliberately not modelled in this phase.
+ *
+ * Palette — deep navy, forest teal, sage, warm ivory, muted amber. The roles are
+ * semantic, not decorative: teal is the only interactive accent, navy carries
+ * headings and the dark panels, warm ivory is the page canvas, white marks the
+ * surfaces selected out of it, sage is a subtle supporting fill, and amber is
+ * reserved for warnings and for capabilities that are planned rather than built.
+ * Contrast is measured, not assumed: every text pairing below clears WCAG AA
+ * (4.5:1) and every status dot, ring and focus bar clears 3:1 against the
+ * surfaces it appears on.
+ * ------------------------------------------------------------------------ */
 @theme {
+  /* --- Font families ---------------------------------------------------- */
   --font-sans:
-    "Inter", "Segoe UI", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial,
-    sans-serif;
+    "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono:
+    "Cascadia Mono", "Segoe UI Mono", ui-monospace, SFMono-Regular, Consolas, "Liberation Mono",
+    monospace;
+
+  /* --- Surfaces --------------------------------------------------------- */
+  --color-canvas: #f7f6f1;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #e6efea;
+  --color-surface-hover: #fbfaf6;
+  --color-inverse: #172b35;
+  --color-inverse-raised: #1e3844;
+  --color-inverse-hover: #27454f;
+
+  /* --- Text ------------------------------------------------------------- */
+  --color-ink: #172b35;
+  --color-ink-secondary: #3a4e58;
+  --color-ink-muted: #4e6570;
+  --color-ink-subtle: #586b73;
+  --color-ink-inverse: #eaf2f0;
+  --color-ink-inverse-muted: #a6bdc2;
+
+  /* --- Borders and dividers --------------------------------------------- */
+  --color-line: #e4e7df;
+  --color-line-strong: #cbd2c9;
+  --color-line-inverse: #2b4552;
+
+  /* --- Interaction, disabled and overlay roles --------------------------
+   * A control never invents its own focus colour, disabled fill or scrim:
+   * these are the only names the primitives may use for those states.
+   * `accent-on-inverse` exists because forest teal on deep navy measures 2.3:1,
+   * below the 3:1 a focus ring or status mark needs against a dark surface; the
+   * lighter step is used there and nowhere else. */
+  --color-focus: #176b63;
+  --color-on-accent: #ffffff;
+  --color-on-accent-muted: #d2e8e2;
+  --color-surface-disabled: #edefea;
+  --color-ink-disabled: #93a2a8;
+  --color-line-disabled: #e4e7df;
+  --color-overlay: rgb(23 43 53 / 0.55);
+
+  /* --- Accent ----------------------------------------------------------- */
+  --color-accent: #176b63;
+  --color-accent-hover: #135c55;
+  --color-accent-active: #0f4a44;
+  --color-accent-surface: #e6efea;
+  --color-accent-line: #c6dbd1;
+  --color-accent-ink: #0f4a44;
+  --color-accent-on-inverse: #7fc6bc;
+
+  /* --- Semantic status roles -------------------------------------------
+   * Every role is a quartet: `solid` (bars, dots), `-surface` (fills),
+   * `-line` (rings/borders), `-ink` (text). lib/semantic.ts maps domain
+   * values onto these role names — never pick a colour at a call site.
+   * Amber carries "warning" and "planned": `caution` is the same hue pushed
+   * darker so the two stay separable side by side. */
+  --color-neutral: #5c7078;
+  --color-neutral-surface: #edefea;
+  --color-neutral-line: #dce2de;
+  --color-neutral-ink: #3f5560;
+
+  --color-info: #2e6c86;
+  --color-info-surface: #e9f1f4;
+  --color-info-line: #c3dce5;
+  --color-info-ink: #1f4c5c;
+
+  --color-success: #1f6b4f;
+  --color-success-surface: #e7f3ec;
+  --color-success-line: #bbdcc8;
+  --color-success-ink: #0f5132;
+
+  --color-warning: #b77935;
+  --color-warning-surface: #faf1e2;
+  --color-warning-line: #e8d3ae;
+  --color-warning-ink: #7a4e1b;
+
+  --color-caution: #8f5b1f;
+  --color-caution-surface: #f4e7d3;
+  --color-caution-line: #dfc29b;
+  --color-caution-ink: #6b421a;
+
+  --color-critical: #a93226;
+  --color-critical-surface: #fbedec;
+  --color-critical-line: #efc9c5;
+  --color-critical-ink: #8a2b2b;
+
+  /* --- Radius ----------------------------------------------------------- */
+  --radius-control: 0.5rem;
+  --radius-card: 0.875rem;
+  --radius-overlay: 1rem;
+  --radius-pill: 9999px;
+
+  /* --- Shadows ----------------------------------------------------------
+   * Tinted with the ink hue rather than neutral black, so every elevation
+   * implies the same light source over an ivory canvas. */
+  --shadow-card: 0 1px 2px 0 rgb(23 43 53 / 0.05);
+  --shadow-raised: 0 8px 20px -8px rgb(23 43 53 / 0.18);
+  --shadow-overlay: 0 24px 48px -16px rgb(23 43 53 / 0.28);
+  --shadow-toast: 0 12px 28px -12px rgb(23 43 53 / 0.24);
+
+  /* --- Type scale ------------------------------------------------------- */
+  --text-display: 1.875rem;
+  --text-display--line-height: 2.25rem;
+  --text-display--letter-spacing: -0.02em;
+
+  /*
+   * The one marketing step. The public landing page needs a headline larger
+   * than `display`, which is sized for an in-app page title; adding it here
+   * keeps the landing page inside the same scale instead of inventing sizes at
+   * its call sites. Nothing in the authenticated application uses it.
+   */
+  --text-hero: 2.5rem;
+  --text-hero--line-height: 1.1;
+  --text-hero--letter-spacing: -0.025em;
+
+  --text-title: 1.5rem;
+  --text-title--line-height: 2rem;
+  --text-title--letter-spacing: -0.015em;
+
+  --text-section: 0.9375rem;
+  --text-section--line-height: 1.25rem;
+
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.25rem;
+
+  --text-supporting: 0.8125rem;
+  --text-supporting--line-height: 1.125rem;
+
+  --text-meta: 0.75rem;
+  --text-meta--line-height: 1rem;
+
+  --text-eyebrow: 0.6875rem;
+  --text-eyebrow--line-height: 0.875rem;
+  --text-eyebrow--letter-spacing: 0.06em;
+
+  --text-data: 0.8125rem;
+  --text-data--line-height: 1.125rem;
+
+  /* --- Spacing ----------------------------------------------------------
+   * `card-*`/`gutter` size the existing page furniture; `control-*`, `row-y`,
+   * `stack` and `page` are the scale the new primitives and later page phases
+   * use, so padding is never hand-tuned per component. */
+  --spacing-card-x: 1.25rem;
+  --spacing-card-y: 1rem;
+  --spacing-gutter: 1.5rem;
+  --spacing-page: 2rem;
+  --spacing-control-x: 0.875rem;
+  --spacing-control-y: 0.4375rem;
+  --spacing-row-y: 0.625rem;
+  --spacing-stack: 0.75rem;
+
+  /* --- Breakpoints ------------------------------------------------------
+   * The shell needs a measure change at 1440px, which is between Tailwind's
+   * `xl` (1280px) and `2xl` (1536px). Nothing in this project uses `2xl`, so
+   * the custom `wide:` variant can sit after the defaults without a cascade
+   * conflict. */
+  --breakpoint-wide: 90rem;
+
+  /* --- Motion -----------------------------------------------------------
+   * Two named animations only; both are neutralised under
+   * `prefers-reduced-motion` at the bottom of this file. */
+  --animate-progress-sweep: progress-sweep 1.4s ease-in-out infinite;
+  --animate-overlay-in: overlay-in 0.18s ease-out;
+
+  @keyframes progress-sweep {
+    0% {
+      transform: translateX(-100%);
+    }
+    60% {
+      transform: translateX(140%);
+    }
+    100% {
+      transform: translateX(250%);
+    }
+  }
+
+  @keyframes overlay-in {
+    from {
+      opacity: 0;
+      transform: translateY(0.5rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
 }
 
 html,
@@ -13,11 +273,46 @@ body,
   height: 100%;
 }
 
+/* Anchor navigation on the landing page should arrive rather than jump. The
+   reduced-motion block at the bottom of this file turns this back off. */
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
-  background-color: #f8fafc;
-  color: #0f172a;
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* The one visible-focus treatment. Primitives add `focus-visible:outline-*`
+   classes, but a control that forgets them still gets a ring: focus must never
+   depend on a component author remembering a class string. */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* The same ring, in the lighter teal step, once it sits on a navy panel: the
+   default accent measures 2.3:1 against `inverse` and would be invisible to the
+   low-vision keyboard user the rule exists for. Keyed off the surface classes
+   rather than per-control so a dark section cannot forget to opt in. */
+.bg-inverse :focus-visible,
+.bg-inverse-raised :focus-visible,
+.bg-inverse-hover :focus-visible {
+  outline-color: var(--color-accent-on-inverse);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

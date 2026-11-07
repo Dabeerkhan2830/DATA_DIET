@@ -169,7 +169,9 @@ def bootstrap(
     user = db.execute(select(AppUser).where(AppUser.email == email)).scalar_one_or_none()
     user_created = user is None
 
-    
+    # Load every related row and validate the full plan before mutating
+    # anything, so a refused reactivation or role change cannot leave a partial
+    # promotion behind.
     institution = None
     membership = None
     if institution_id is not None:

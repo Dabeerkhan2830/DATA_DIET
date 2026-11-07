@@ -18,17 +18,20 @@ export const RETENTION_PREFIX = "/api/v1/retention";
 
 /* ------------------------------- policies -------------------------------- */
 
-export function listPolicies(params?: {
-  status?: string;
-  institution_id?: number;
-}): Promise<Policy[]> {
+export function listPolicies(
+  params?: {
+    status?: string;
+    institution_id?: number;
+  },
+  signal?: AbortSignal,
+): Promise<Policy[]> {
   const query = new URLSearchParams();
   if (params?.status) query.set("status", params.status);
   if (params?.institution_id !== undefined) {
     query.set("institution_id", String(params.institution_id));
   }
   const qs = query.toString();
-  return apiGet<Policy[]>(`${RETENTION_PREFIX}/policies${qs ? `?${qs}` : ""}`);
+  return apiGet<Policy[]>(`${RETENTION_PREFIX}/policies${qs ? `?${qs}` : ""}`, signal);
 }
 
 export function getPolicy(policyId: number): Promise<Policy> {
@@ -89,17 +92,20 @@ export function activatePolicyVersion(
 
 /* --------------------------------- holds --------------------------------- */
 
-export function listHolds(params?: {
-  status?: string;
-  institution_id?: number;
-}): Promise<Hold[]> {
+export function listHolds(
+  params?: {
+    status?: string;
+    institution_id?: number;
+  },
+  signal?: AbortSignal,
+): Promise<Hold[]> {
   const query = new URLSearchParams();
   if (params?.status) query.set("status", params.status);
   if (params?.institution_id !== undefined) {
     query.set("institution_id", String(params.institution_id));
   }
   const qs = query.toString();
-  return apiGet<Hold[]>(`${RETENTION_PREFIX}/holds${qs ? `?${qs}` : ""}`);
+  return apiGet<Hold[]>(`${RETENTION_PREFIX}/holds${qs ? `?${qs}` : ""}`, signal);
 }
 
 export interface HoldCreateInput {
@@ -126,20 +132,40 @@ export function assessAsset(assetId: number): Promise<Assessment> {
   return apiPost<Assessment>(`${RETENTION_PREFIX}/assess/${assetId}`);
 }
 
-export function getAssessmentHistory(assetId: number): Promise<Assessment[]> {
-  return apiGet<Assessment[]>(`${RETENTION_PREFIX}/assessments/${assetId}/history`);
+export function getAssessmentHistory(
+  assetId: number,
+  signal?: AbortSignal,
+): Promise<Assessment[]> {
+  return apiGet<Assessment[]>(
+    `${RETENTION_PREFIX}/assessments/${assetId}/history`,
+    signal,
+  );
 }
 
-export function listRecommendations(params?: {
-  page?: number;
-  per_page?: number;
-  institution_id?: number;
-  review_status?: string;
-  recommendation?: string;
-  severity?: string;
-  sort?: string;
-  search?: string;
-}): Promise<PaginatedRecommendations> {
+/**
+ * The queue's query parameters, exactly as `routes/retention.py:439` declares
+ * them. The four range filters are already coerced by FastAPI
+ * (`assessed_from`/`_to` are `datetime`, `deadline_from`/`_to` are `date`), so
+ * they are sent as ISO strings here and applied inclusively in SQL
+ * (`services/retention.py:818-825`) — no client-side comparison anywhere.
+ */
+export function listRecommendations(
+  params?: {
+    page?: number;
+    per_page?: number;
+    institution_id?: number;
+    review_status?: string;
+    recommendation?: string;
+    severity?: string;
+    sort?: string;
+    search?: string;
+    assessed_from?: string;
+    assessed_to?: string;
+    deadline_from?: string;
+    deadline_to?: string;
+  },
+  signal?: AbortSignal,
+): Promise<PaginatedRecommendations> {
   const query = new URLSearchParams();
   if (params?.page !== undefined) query.set("page", String(params.page));
   if (params?.per_page !== undefined) query.set("per_page", String(params.per_page));
@@ -151,9 +177,14 @@ export function listRecommendations(params?: {
   if (params?.severity) query.set("severity", params.severity);
   if (params?.sort) query.set("sort", params.sort);
   if (params?.search) query.set("search", params.search);
+  if (params?.assessed_from) query.set("assessed_from", params.assessed_from);
+  if (params?.assessed_to) query.set("assessed_to", params.assessed_to);
+  if (params?.deadline_from) query.set("deadline_from", params.deadline_from);
+  if (params?.deadline_to) query.set("deadline_to", params.deadline_to);
   const qs = query.toString();
   return apiGet<PaginatedRecommendations>(
     `${RETENTION_PREFIX}/recommendations${qs ? `?${qs}` : ""}`,
+    signal,
   );
 }
 
@@ -181,9 +212,13 @@ export function listAssessmentDecisions(assessmentId: number): Promise<Decision[
  * Server-computed so the review form offers only real, already-authorized
  * choices instead of letting the client invent a correction target.
  */
-export function listSupersessionCandidates(assessmentId: number): Promise<Decision[]> {
+export function listSupersessionCandidates(
+  assessmentId: number,
+  signal?: AbortSignal,
+): Promise<Decision[]> {
   return apiGet<Decision[]>(
     `${RETENTION_PREFIX}/decisions/supersession/source?assessment_id=${assessmentId}`,
+    signal,
   );
 }
 

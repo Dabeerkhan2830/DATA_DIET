@@ -22,14 +22,21 @@ class AuthConfig(BaseModel):
 
     environment: str
     #: ``development``      — a local sign-in provider is active (dev/test only);
+    #: ``clerk``            — session tokens are verified against Clerk's JWKS
+    #:                        (RS256); sign-in itself happens at Clerk, so this
+    #:                        API exposes no sign-in form at all;
     #: ``bearer_boundary``  — tokens are verified, but no browser sign-in exists
     #:                        here: an external identity provider must issue
     #:                        them (the honest state of a production deployment
     #:                        that has configured a secret);
     #: ``unconfigured``     — nothing is wired up, so protected endpoints 503.
-    authentication: Literal["development", "bearer_boundary", "unconfigured"]
-    #: True only when ``/auth/dev-login`` will accept a request.
+    authentication: Literal["development", "clerk", "bearer_boundary", "unconfigured"]
+    #: True only when ``/auth/dev-login`` will accept a request. In a staging or
+    #: production deployment the route is not merely refused — it is not
+    #: registered, so this is always false there (ADR-0025).
     dev_login_enabled: bool
+    #: Which identity provider this deployment trusts, if any.
+    identity_provider: Literal["clerk", "local", "none"]
     issuer: str
     audience: str
     token_ttl_seconds: int

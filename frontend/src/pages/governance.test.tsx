@@ -8,9 +8,10 @@
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 import type { Decision, GovernanceDetail, PaginatedRecommendations } from "../api/types";
 import { testUser, withAuth } from "../test/auth";
 
@@ -37,13 +38,16 @@ import AssetGovernance from "./AssetGovernance";
 const QUEUE: PaginatedRecommendations = {
   items: [
     {
+      id: 71,
       asset_id: 3,
       asset_title: "Payroll export",
+      institution_id: 1,
       recommendation: "BLOCKED_BY_HOLD",
       rationale: "An active hold prevents disposal.",
       severity: "blocked",
       policy_id: 1,
       policy_version_id: 2,
+      policy_version_number: 3,
       holds_active: 1,
       assessed_at: "2026-10-10T00:00:00",
       findings: null,
@@ -184,7 +188,29 @@ beforeEach(() => {
   listSupersessionCandidates.mockResolvedValue([]);
 });
 
+/** Test-only control: changes the signed-in account's active institution scope. */
+function InstitutionScopeSwitch({ to }: { to: number }) {
+  const { setActiveInstitution } = useAuth();
+  return (
+    <button type="button" onClick={() => setActiveInstitution(to)}>
+      scope {to}
+    </button>
+  );
+}
+
+/** Test-only control: navigates to another asset, like the in-app links do. */
+function OpenAsset({ assetId }: { assetId: number }) {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(`/governance/assets/${assetId}`)}>
+      open asset {assetId}
+    </button>
+  );
+}
+
 describe("Review queue", () => {
+  // The fetcher passes (query, signal); the signal is transport-only, so every
+  // filter assertion matches it with expect.any(AbortSignal).
   it("sends the selected filters to the server", async () => {
     listRecommendations.mockResolvedValue(QUEUE);
     render(
@@ -205,6 +231,7 @@ describe("Review queue", () => {
     await waitFor(() => {
       expect(listRecommendations).toHaveBeenLastCalledWith(
         expect.objectContaining({ recommendation: "RETAIN" }),
+        expect.any(AbortSignal),
       );
     });
 
@@ -215,6 +242,7 @@ describe("Review queue", () => {
     await waitFor(() => {
       expect(listRecommendations).toHaveBeenLastCalledWith(
         expect.objectContaining({ review_status: "open" }),
+        expect.any(AbortSignal),
       );
     });
 
@@ -222,6 +250,7 @@ describe("Review queue", () => {
     await waitFor(() => {
       expect(listRecommendations).toHaveBeenLastCalledWith(
         expect.objectContaining({ sort: "age" }),
+        expect.any(AbortSignal),
       );
     });
   });
@@ -248,6 +277,7 @@ describe("Review queue", () => {
     await waitFor(() => {
       expect(listRecommendations).toHaveBeenLastCalledWith(
         expect.objectContaining({ page: 2 }),
+        expect.any(AbortSignal),
       );
     });
   });
@@ -550,5 +580,138 @@ describe("Asset governance view", () => {
       expect(screen.getByText(/payroll export/i)).toBeInTheDocument();
     });
     expect(screen.queryByRole("button", { name: /run assessment/i })).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 2 data-fetching regressions: a request follows the values it depends on,
+ * an unrelated render does not repeat it, and a superseded response cannot
+ * overwrite the result the user is looking at.
+ */
+describe("Request lifecycle on the governance screens", () => {
+  it("queries search once the typing settles, not on every keystroke", async () => {
+    listRecommendations.mockResolvedValue(QUEUE);
+    render(
+      withAuth(
+        <MemoryRouter>
+          <Recommendations />
+        </MemoryRouter>,
+      ),
+    );
+    await screen.findByText("Payroll export");
+    expect(listRecommendations).toHaveBeenCalledTimes(1);
+
+    await userEvent.type(screen.getByRole("searchbox", { name: /search/i }), "payroll");
+
+    // Seven keystrokes, and the queue is not queried one of them at a time.
+    expect(listRecommendations).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => {
+      expect(listRecommendations).toHaveBeenLastCalledWith(
+        expect.objectContaining({ search: "payroll" }),
+        expect.any(AbortSignal),
+      );
+    });
+    expect(listRecommendations).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-queries the queue for the newly active institution", async () => {
+    listRecommendations.mockResolvedValue(QUEUE);
+    render(
+      withAuth(
+        <MemoryRouter>
+          <>
+            <Recommendations />
+            <InstitutionScopeSwitch to={2} />
+          </>
+        </MemoryRouter>,
+        testUser({ institutions: [1, 2] }),
+      ),
+    );
+    await screen.findByText("Payroll export");
+    expect(listRecommendations).toHaveBeenLastCalledWith(
+      expect.objectContaining({ institution_id: 1 }),
+      expect.any(AbortSignal),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /scope 2/i }));
+
+    await waitFor(() => {
+      expect(listRecommendations).toHaveBeenLastCalledWith(
+        expect.objectContaining({ institution_id: 2 }),
+        expect.any(AbortSignal),
+      );
+    });
+    expect(listRecommendations).toHaveBeenCalledTimes(2);
+  });
+
+  it("loads the governance view for the asset named in the route", async () => {
+    fetchAssetGovernance.mockImplementation((assetId: unknown) =>
+      Promise.resolve({ ...DETAIL, asset: { ...DETAIL.asset, id: Number(assetId) } }),
+    );
+    render(
+      withAuth(
+        <MemoryRouter initialEntries={["/governance/assets/3"]}>
+          <Routes>
+            <Route
+              path="/governance/assets/:assetId"
+              element={
+                <>
+                  <AssetGovernance />
+                  <OpenAsset assetId={4} />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>,
+      ),
+    );
+    await screen.findByText(/Asset Governance . #3/);
+    expect(fetchAssetGovernance).toHaveBeenCalledTimes(1);
+    expect(fetchAssetGovernance).toHaveBeenLastCalledWith(3, 1, expect.any(AbortSignal));
+
+    await userEvent.click(screen.getByRole("button", { name: /open asset 4/i }));
+    await screen.findByText(/Asset Governance . #4/);
+
+    expect(fetchAssetGovernance).toHaveBeenCalledTimes(2);
+    expect(fetchAssetGovernance).toHaveBeenLastCalledWith(4, 1, expect.any(AbortSignal));
+  });
+
+  it("re-fetches the governance view for the newly active institution", async () => {
+    const signals: AbortSignal[] = [];
+    fetchAssetGovernance.mockImplementation(
+      (_assetId: unknown, _scope: unknown, signal: unknown) => {
+        signals.push(signal as AbortSignal);
+        return Promise.resolve(DETAIL);
+      },
+    );
+    render(
+      withAuth(
+        <MemoryRouter initialEntries={["/governance/assets/3"]}>
+          <Routes>
+            <Route
+              path="/governance/assets/:assetId"
+              element={
+                <>
+                  <AssetGovernance />
+                  <InstitutionScopeSwitch to={2} />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>,
+        testUser({ institutions: [1, 2] }),
+      ),
+    );
+    await screen.findByText(/Payroll export/);
+    expect(fetchAssetGovernance).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+
+    await userEvent.click(screen.getByRole("button", { name: /scope 2/i }));
+
+    await waitFor(() => expect(fetchAssetGovernance).toHaveBeenCalledTimes(2));
+    // The request scoped to the previous institution is cancelled, not ignored.
+    expect(signals[0].aborted).toBe(true);
+    expect(fetchAssetGovernance).toHaveBeenLastCalledWith(3, 2, expect.any(AbortSignal));
   });
 });

@@ -11,11 +11,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
+from app.api.routes import auth as auth_routes
 from app.core.config import get_settings
 
 
 def create_app() -> FastAPI:
-    """Build the FastAPI application with middleware and routes."""
+    """Build the FastAPI application with middleware and routes.
+
+    The development sign-in provider is registered conditionally, by the app
+    factory rather than by a check inside the handler: in ``staging`` and
+    ``production`` ``POST /api/v1/auth/dev-login`` is absent from the OpenAPI
+    schema and answers 404, because a route that merely returns an error is
+    still a route an anonymous caller can reach (ADR-0025).
+    """
     settings = get_settings()
 
     application = FastAPI(
@@ -45,6 +53,10 @@ def create_app() -> FastAPI:
     )
 
     application.include_router(api_router, prefix=settings.api_v1_prefix)
+    if not settings.protected_environment:
+        application.include_router(
+            auth_routes.dev_router, prefix=settings.api_v1_prefix, tags=["authentication"]
+        )
 
     @application.get("/", include_in_schema=False)
     def root() -> dict[str, str]:

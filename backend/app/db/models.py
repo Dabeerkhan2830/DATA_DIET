@@ -496,6 +496,51 @@ class UserMembership(Base):
     )
 
 
+class ExternalIdentity(Base):
+    """One stable account in an external identity provider (Phase 6, ADR-0025).
+
+    This row *is* the identity binding: ``provider`` + ``external_subject`` is
+    the primary key of the relationship, and it — not the email address — is how
+    a Clerk ``sub`` claim finds a DataDiet account. Email is kept only as a
+    display/administration convenience, so a user changing their email address
+    at the provider cannot create a second DataDiet account, and two accounts
+    that happen to share an address can still be told apart.
+
+    The row authorises nothing by itself. Roles and institution scope live in
+    :class:`UserMembership` and the ``is_platform_admin`` flag on
+    :class:`AppUser`, all of which stay database-authoritative; a binding with no
+    membership is an account that can sign in and see nothing.
+    """
+
+    __tablename__ = "external_identities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: Which provider minted the subject, e.g. ``clerk``. Kept as a string so a
+    #: future provider adds rows without a schema change.
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The provider's own immutable user id (Clerk's ``sub``, e.g. ``user_…``).
+    external_subject: Mapped[str] = mapped_column(String(120), nullable=False)
+    app_user_id: Mapped[int] = mapped_column(
+        ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False
+    )
+    #: The email observed when the binding was created. Never used to resolve a
+    #: subject, and deliberately not refreshed on reads, so it can differ from
+    #: ``AppUser.email`` without any effect.
+    last_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: ``offline_script`` or ``auto_provision`` — how the binding came to exist.
+    bound_by: Mapped[str] = mapped_column(String(40), nullable=False, default="offline_script")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "external_subject", name="uq_external_identity_provider_subject"
+        ),
+        Index("ix_external_identities_app_user", "app_user_id"),
+    )
+
+
 # --- Phase 4: controlled data ingestion ------------------------------------
 
 

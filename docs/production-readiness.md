@@ -12,13 +12,48 @@ production backup has been configured or verified.
 
 ## What is actually tested
 
-- Local gate: `scripts/check.ps1` exits 0 with 216 backend tests passed and
-  20 skipped (19 live-MySQL tests and one Windows-only symlink test), 80
-  frontend tests passed, Ruff clean, TypeScript clean, and a production build.
-  Operator scripts are linted with the backend Ruff configuration.
+- Local gate (re-run for Phase 6.0, 2026-11-04): `scripts/check.ps1` exits 0 and
+  prints "All checks passed." — backend Ruff, operator-script Ruff, `pytest`
+  (340 passed, 20 skipped: the 19 live-MySQL migration tests plus one
+  Windows-symlink-dependent test), frontend TypeScript, Vitest
+  (507 tests in 32 files, all passing), and a production build. Nothing was
+  committed or pushed. The Vitest worker configuration that makes the last gate
+  reproducible is pinned in `frontend/package.json` and explained in
+  `docs/setup.md` section 6: with Vitest's *default* pool the same 507 tests fail
+  a shifting set of 5–6 (exit 1) from `Test timed out in 5000ms` and 1-second
+  `findBy` timeouts caused by one-fork-per-core oversubscription, which is a
+  concurrency artefact, not behaviour. No timeout was raised and no test skipped.
+- Identity (Phase 6.0, local only): 103 tests — `test_clerk_verification.py`
+  (32), `test_jwks_client.py` (22), `test_clerk_identity.py` (35),
+  `test_bind_clerk_identity.py` (14) — using **locally generated RSA key pairs
+  and a locally served JWKS document**. No test has contacted a Clerk instance,
+  so provider-issued token shape, hosted sign-in behaviour and real key rotation
+  cadence remain unverified here.
+- PostgreSQL (Phase 6.0, local only): 10 tests in
+  `backend/tests/test_migrations_postgresql.py` run against a real PostgreSQL
+  server started by the `pgserver` test-only dependency (loopback, disposable
+  data directory) — the baseline-vs-ORM metadata comparison, the stamp-then-
+  upgrade entry path, single-head integrity and the forward-only downgrade. This
+  is not a managed-provider rehearsal: no Render/Aurora/Neon instance was
+  touched, TLS was not exercised, and no PostgreSQL restore drill was run.
+- Frontend auth (Phase 6.0): `src/auth/ClerkAuth.test.tsx` (11) and
+  `src/pages/SignIn.test.tsx` (11) drive a reactive `@clerk/clerk-react`
+  stand-in — signed-in bootstrap, per-request bearer resolution, absence of any
+  DataDiet-held token, stale development credential discarded, signed-out state,
+  unbound subject, `identity_provider_unavailable`, 401 forced sign-out,
+  permissionless membership, sign-out, token-mint failure, protected routes.
+  These prove DataDiet's side of the contract against a documented SDK surface,
+  not Clerk's servers.
 - Live migration suite: 19/19 passed against a disposable MySQL 8.0.46
-  instance on 2026-10-21, including the `0011` preflight/reset and the new
-  `0012` audit-record/idempotency test.
+  instance on 2026-10-21, including the `0011` preflight/reset and the
+  `0012` audit-record/idempotency test. Phase 6.0 updated 16 lines of that
+  suite's expectations (head is now `0014_external_identities`, and
+  `0013_postgresql_baseline` is expected as a *pending no-op* on MySQL) but the
+  suite was **not re-run**: no MySQL server and no Docker exist in this
+  environment, so it skipped 19/19 (exit 0) and the first real execution of the
+  edited expectations will be the CI `mysql:8.4` job — which has itself never
+  run. `0013`/`0014` have therefore never been applied to a MySQL database
+  anywhere.
 - CI workflow: `.github/workflows/ci.yml` is configured for pull requests and
   pushes to `main`. Its YAML parses and its local equivalents ran, but the
   workflow has **not run on GitHub yet** (nothing in this phase was committed
@@ -27,18 +62,20 @@ production backup has been configured or verified.
   suite passed on MySQL 8.0.46 instead.
 - Backup/restore: a real dump-and-restore drill was performed on a disposable
   MySQL instance; 21/21 table checksums matched, the restored revision was
-  `0011` at drill time (current head is `0012`), and the preflight exited 0
+  `0011` at drill time (current head is `0014`), and the preflight exited 0
   (`docs/backup-restore.md` section 9). The separately documented read-only
   backup and least-privilege scratch credentials were not exercised; no
-  production-sized, managed-provider, or live restore was tested.
+  production-sized, managed-provider, or live restore was tested, and no
+  PostgreSQL dump/restore drill exists yet.
 - No migration was applied to a durable database in this phase. The only
-  durable databases in the development environment were left untouched.
+  durable databases in the development environment were left untouched, and no
+  Render, Azure, or Clerk resource was created or configured.
 
 ## Summary of production gates
 
 | Area | Current state | Gate to production |
 | --- | --- | --- |
-| Identity provider | HS256 shared secret only; no OIDC discovery, RS256/ES256 or JWKS | **Blocker** |
+| Identity provider | Clerk RS256/JWKS verification implemented and tested locally (ADR-0025); no OIDC discovery, and never exercised against a live provider; HS256 bearer boundary remains the fallback when no issuer is configured | **Blocker** |
 | Secrets | `.env`/process environment only; no manager or rotation procedure | **Blocker** |
 | CORS / trusted hosts | CORS allowlist exists; no `TrustedHostMiddleware` or host allowlist | Required |
 | TLS / reverse proxy | Nginx placeholder on port 80; no TLS/HSTS/CSP; backend proxied over HTTP | **Blocker** |
@@ -46,9 +83,9 @@ production backup has been configured or verified.
 | Audit / sensitive data | Append-only application audit events; no retention, centralization, tamper evidence, or alerting | Required |
 | Backup / recovery | Documented and drill-tested procedure; manual, with no automation, PITR, or monitoring | **Blocker** for operations |
 | Monitoring | Liveness and readiness probes only; no metrics, tracing, or alerting | **Blocker** for operations |
-| Migration / admin recovery | Read-only preflight (MySQL-only), documented `0011`/`0012` runbook, offline one-account recovery with actor and explicit reactivation/role-change flags; manual by design | Procedure ready; production rehearsal and pre-migration export audit not done |
+| Migration / admin recovery | Read-only preflight (MySQL **and PostgreSQL** since ADR-0025), documented `0011`/`0012` runbook, PostgreSQL entry path (`stamp 0012` → `upgrade head`, baseline `0013` forward-only), offline one-account recovery with actor and explicit reactivation/role-change flags, offline Clerk identity binding; manual by design | Procedure ready; production rehearsal, pre-migration export audit and any managed-provider PostgreSQL restore rehearsal not done |
 | CI / supply chain | Workflow added with Actions pinned to full SHAs and a pinned MySQL image; branch protection, dependency/secret scanning, and Python lockfile not in place; workflow has not run remotely | Required |
-| Browser boundary | Bearer token in `localStorage`; no CSP; API docs exposed through the proxy | Required |
+| Browser boundary | Development path: bearer token in `localStorage`, no CSP, API docs exposed through the proxy. Clerk path (ADR-0025): DataDiet holds no provider token — `ClerkBoundary` clears the stored development credential on mount and resolves a session token per request through Clerk's supported SDK, and `frontend/src/api/tokenStore.ts` stays empty (asserted in `src/auth/ClerkAuth.test.tsx`); Clerk's own SDK manages its own browser session state, which is not DataDiet storage. The development path itself is not registered in a protected environment | Required (CSP, docs exposure) |
 
 ## 1. Identity: OIDC, RS256, and JWKS
 
@@ -70,37 +107,63 @@ and hard-disables the development sign-in provider when
 `ENVIRONMENT=production`; a configured secret shorter than 32 characters
 refuses startup; an absent secret leaves protected endpoints at 503
 `auth_not_configured:`. Configuration validation errors hide submitted input.
+(From Phase 6.0 the protection is stronger than "refusal": `staging` and
+`production` are the protected environments, and `create_app` does not register
+the dev-login route there at all — `POST /api/v1/auth/dev-login` answers 404 and
+is absent from the OpenAPI document. See §1's Gap.)
 
-**Gap.** This is not a real OIDC integration. There is no RS256/ES256
-verification, no JWKS discovery/fetch/cache, no `kid` rotation handling, no
-OIDC provider metadata, no refresh or revocation flow, and no production
-sign-in path. An operator can paste an externally issued HS256 token, but a
-real identity provider normally signs with an asymmetric key and publishes a
-JWKS document. The current shared-secret model means every token issuer and
-verifier holds the same secret, and rotating it invalidates all sessions.
+**Gap.** *(Partially closed by Phase 6.0 / ADR-0025 — recorded and implemented,
+still not proven against a live provider.)* RS256 verification against a cached
+JWKS document, `kid` rotation with a rate-limited refresh, algorithm allowlisting
+that can never fall back to HS256, issuer/audience/expiry enforcement, a
+`(provider, subject)` identity table that keeps authorization directory-based, and
+a conditional dev-login route that does not exist in a protected environment are all
+implemented and tested locally (`backend/app/core/jwks.py`,
+`tests/test_clerk_verification.py`, `test_jwks_client.py`, `test_clerk_identity.py`,
+`test_bind_clerk_identity.py`). What remains open here: this is still not OIDC —
+there is no provider metadata or discovery document, the JWKS URL is derived from a
+manually configured issuer, and no automated test has spoken to a real identity
+provider instance, so the provider-side behaviour (hosted sign-in, token minting and
+refresh) is unverified in this repository. There is no refresh, revocation, or
+BFF/HttpOnly-cookie flow: sign-out ends the provider's browser session and discards
+the local credential, which is not the same as server-side revocation. And no
+staging deployment exists yet, so the "real user through an approved provider" exit
+criterion below is not met.
 
 **Required before production.**
 
 - Record an ADR for the identity architecture, including the resource-server
-  versus browser-flow boundary and the allowed signing algorithms.
+  versus browser-flow boundary and the allowed signing algorithms. *(Done:
+  ADR-0025.)*
 - Implement OIDC discovery and RS256/ES256 JWKS verification with a vetted
   library (this adds a dependency) or an explicitly reviewed implementation;
   enforce issuer, audience, token type, expiry, and clock skew; support key
-  rotation by `kid`.
+  rotation by `kid`. *(RS256 + JWKS + `kid` rotation + issuer/audience/expiry
+  done with PyJWT's verifier; OIDC discovery and ES256 are not.)*
 - Keep authorization directory-based. Define how a verified subject/email maps
   to a local account and what happens when no account exists (deny; no
-  auto-provisioning by default).
+  auto-provisioning by default). *(Done: `external_identities`, operator-bound,
+  `CLERK_AUTO_PROVISION=false` by default and permissionless even when on.)*
 - Decide whether refresh tokens, session revocation, or a backend-for-frontend
   (BFF) with HttpOnly cookies are required. The current stateless bearer token
-  has no logout/revocation endpoint; sign-out is client-side only.
+  has no logout/revocation endpoint; sign-out is client-side only. *(Still open;
+  Clerk shortens the blast radius by minting short-lived session tokens, but does
+  not revoke them here.)*
 - Add tests using generated keys and a local JWKS document: valid token
   accepted; wrong key, algorithm, issuer, audience, expiry, and malformed token
   rejected; key rotation accepted; dev-login and the shared secret are
-  unavailable in production.
+  unavailable in production. *(Done — the negative cases are automated; the
+  "unavailable in production" case is now "not registered at all", answered 404.)*
 
 **Exit criteria.** A staging deployment authenticates a real user through an
 approved provider; all negative cases above are covered by automated tests;
-production has no shared HS256 secret and no development sign-in path.
+production has no shared HS256 secret and no development sign-in path. *(The
+negative cases are covered; the staging and production halves are not — nothing
+has been deployed, and a protected environment still falls back to the HS256
+bearer boundary if an operator sets `AUTH_JWT_SECRET` without `CLERK_ISSUER`.
+The operational half of that exit criterion — what to configure on Render, in
+what order, and which 12 statements must be observed before staging counts as
+real — is `docs/render-staging.md`; it is preparation only.)*
 
 ## 2. Secret management and rotation
 
@@ -216,6 +279,15 @@ migration or backup role, and no connection-pool limit beyond the SQLAlchemy
 defaults in `backend/app/db/session.py` (`pool_pre_ping`, `pool_recycle=1800`).
 The application does not apply migrations at startup; operators run Alembic
 manually.
+
+Phase 6.0 (ADR-0025) adds PostgreSQL as a second supported engine for staging,
+with `postgresql+psycopg2://` required (the driver suffix is not decorative —
+`config.py` documents that a bare `postgresql://` URL selects psycopg 3, which is
+not installed). Nothing in this section changes for it: the engine is still
+reached by one `DATABASE_URL`, the application still passes no TLS options of its
+own (for PostgreSQL that means `?sslmode=…` in the URL, which
+`docs/render-staging.md` section 6 tells the operator to set), and the runtime
+credential still has the same DDL rights as the migration credential.
 
 **Gap.** A production database must not be publicly reachable, must require
 TLS, and must not give the runtime application DDL rights. Sharing one
@@ -409,6 +481,9 @@ This is a sequence, not a risk score:
 
 1. Approve the identity ADR and implement RS256/JWKS verification with a real
    staging provider; keep fail-closed behavior and add negative tests.
+   *(ADR-0025 approved, RS256/JWKS implemented, fail-closed behaviour extended,
+   negative tests added. "With a real staging provider" is still open: the
+   provider side has never been contacted — see `docs/render-staging.md`.)*
 2. Introduce a secret manager, production configuration validation, and a
    rehearsed rotation procedure.
 3. Configure TLS, reverse-proxy trust, trusted hosts, HTTPS-only CORS, CSP, and
@@ -420,7 +495,11 @@ This is a sequence, not a risk score:
    drills.
 7. Rehearse migrations `0011` and `0012` plus administrator recovery on
    production-like staging, including the pre-migration export and `0012`
-   audit record.
+   audit record. *(Phase 6.0 extends this to the whole chain through
+   `0014_external_identities`: the rehearsal must cover the PostgreSQL entry
+   path (`stamp 0012` → `upgrade head`), the MySQL no-op path for `0013`, and a
+   Clerk identity bind/unbind, none of which has been rehearsed on a durable
+   database.)*
 8. Make CI green and required, complete a reproducible Python lockfile and
    dependency/secret scanning, and add the production image/deployment
    artifact.
@@ -430,13 +509,21 @@ This is a sequence, not a risk score:
 ## Explicit non-claims
 
 - No production deployment, production connection, or durable-database
-  migration was performed in Phase 9.
-- No real OIDC/IdP, RS256/JWKS verification, secret manager, TLS terminator,
-  monitoring stack, or automated backup exists in this repository.
+  migration was performed in Phase 9, and none was performed in Phase 6.0: no
+  Render, Azure, or Clerk resource was created, and no Alembic command touched a
+  managed database.
+- No real OIDC/IdP exists in this repository. RS256/JWKS verification **does**
+  exist since Phase 6.0 (ADR-0025) — but only ever exercised against locally
+  generated RSA keys and a local JWKS document, with no OIDC discovery and no
+  ES256. A secret manager, TLS terminator, monitoring stack, and automated
+  backup still do not exist.
 - The CI workflow has not yet been executed by GitHub.
 - The restore drill was on a disposable database only; it does not verify a
   production backup, provider snapshot, or point-in-time recovery, and it did
   not exercise the separate read-only backup and scratch restore identities.
+- PostgreSQL evidence stops at a real-but-local `pgserver` instance: no managed
+  provider, no enforced TLS, no `pg_dump` restore drill, and no MySQL replay of
+  `0013`/`0014` beyond their documented no-op path in the unit tests.
 - Local tests passing is not production verification. The application must
   remain unavailable to real institutional data until the gates above are
   implemented, reviewed, and tested.

@@ -1,26 +1,23 @@
-"""Bearer-token (JWT, HS256) verification and issuance (Phase 7).
+"""Bearer-token verification for DataDiet (Phase 7, extended in Phase 6.0).
 
-This module is the *resource-server* half of an OIDC/SSO integration: it
-validates a bearer token that an identity provider issued. It is deliberately
-small, dependency-free (standard library only) and strict.
+Two verification paths exist, and which one a deployment uses is decided by
+*server-side configuration*, never by the incoming token:
 
-Verification enforces, in order:
+``verify_token``
+    Strict HS256, standard library only. Used by the development/test provider
+    and by the existing test suite. It is never reachable in staging or
+    production (ADR-0025).
 
-* exactly three ``base64url``-encoded segments;
-* ``alg`` is exactly ``HS256`` (``none`` and algorithm confusion are rejected by
-  never consulting the token for the algorithm);
-* the HMAC-SHA256 signature, compared in constant time;
-* ``iss`` equality, ``aud`` membership, and a required, unexpired ``exp``.
+``verify_clerk_token``
+    RS256 against the identity provider's published JWKS (``app.core.jwks``),
+    the path a real Clerk deployment uses. It replaces the HS256 path; it does
+    not consult it, and it never falls back to it.
 
-Nothing in here logs, persists, or returns the shared secret, and no claim is
-trusted for authorization — see ``app.core.auth`` for the authorization layer,
-which uses the local user directory rather than token claims.
-
-A real OIDC provider signs with RS256/ES256 and publishes a JWKS document.
-Supporting that requires a JWKS client and a crypto library; it is intentionally
-not implemented here, and production therefore stays fail-closed until such a
-provider (or an HS256 shared secret it actually uses) is configured. See
-``docs/decisions.md`` ADR-0014.
+Both share :class:`TokenError`, so the HTTP layer keeps producing the same
+stable machine-readable prefixes (`malformed_token`, `invalid_signature`,
+`token_expired`, ...). Nothing here logs, persists, or returns a key or a
+secret, and no claim is trusted for authorization — see ``app.core.auth``,
+which resolves identity against the local directory instead.
 """
 
 from __future__ import annotations
@@ -30,15 +27,26 @@ import hashlib
 import hmac
 import json
 import time
+from functools import lru_cache
 from typing import Any
+
+import jwt
+from jwt import PyJWTError
+
+from app.core.jwks import ALLOWED_ALGORITHMS, JwksClient, JwksError, JwksUnavailableError
 
 # Algorithms this module is willing to accept. The value is fixed rather than
 # read from the token header, so an attacker-supplied ``alg`` can never select
 # the verification strategy.
 ALGORITHM = "HS256"
 
-# Claims that must be present and well typed for a token to be usable.
+#: Claims that must be present and well typed for a token to be usable.
 _REQUIRED_CLAIMS = ("iss", "aud", "exp", "sub")
+
+#: Clock skew tolerated when comparing ``exp``/``nbf``/``iat``, in seconds. A
+#: small leeway absorbs ordinary clock drift between deployment and provider;
+#: it does not extend a token's useful lifetime by more than this.
+DEFAULT_LEEWAY_SECONDS = 30.0
 
 
 class TokenError(Exception):
@@ -192,4 +200,121 @@ def verify_token(
         if current < float(not_before):
             raise TokenError("token_not_yet_valid", "The bearer token is not valid yet")
 
+    return claims
+
+
+# --------------------------------------------------------------------------- #
+# Clerk (RS256 + JWKS) verification — Phase 6.0, ADR-0025
+# --------------------------------------------------------------------------- #
+
+
+@lru_cache(maxsize=8)
+def get_jwks_client(jwks_url: str) -> JwksClient:
+    """One cached JWKS client per URL for the life of the process.
+
+    Caching the *client* (not just the keys) is what keeps JWKS retrieval off
+    the request path: repeated verification of tokens naming a known ``kid``
+    performs no network I/O at all.
+    """
+    return JwksClient(jwks_url)
+
+
+def reset_jwks_clients() -> None:
+    """Drop cached JWKS clients (used by tests when configuration changes)."""
+    get_jwks_client.cache_clear()
+
+
+def _token_error_for_jwt_exception(cause: Exception) -> TokenError:
+    """Map a PyJWT failure onto this API's stable 401 prefixes."""
+    if isinstance(cause, jwt.ExpiredSignatureError):
+        return TokenError("token_expired", "The bearer token has expired; sign in again")
+    if isinstance(cause, jwt.ImmatureSignatureError):
+        return TokenError("token_not_yet_valid", "The bearer token is not valid yet")
+    if isinstance(cause, jwt.InvalidIssuerError):
+        return TokenError(
+            "invalid_issuer", "The bearer token was issued by an unexpected issuer"
+        )
+    if isinstance(cause, jwt.InvalidAudienceError):
+        return TokenError("invalid_audience", "The bearer token is not intended for this API")
+    if isinstance(cause, jwt.MissingRequiredClaimError):
+        missing = getattr(cause, "claim", None) or "required"
+        return TokenError(
+            "missing_claims", f"The bearer token is missing required claims: {missing}"
+        )
+    if isinstance(cause, jwt.InvalidSignatureError):
+        return TokenError("invalid_signature", "The bearer token signature is invalid")
+    if isinstance(cause, (jwt.InvalidTokenError, PyJWTError)):
+        return TokenError("malformed_token", "The bearer token is malformed")
+    return TokenError("malformed_token", "The bearer token is malformed")
+
+
+def verify_clerk_token(
+    token: str,
+    *,
+    issuer: str,
+    audience: str,
+    jwks_client: JwksClient,
+    leeway_seconds: float = DEFAULT_LEEWAY_SECONDS,
+) -> dict[str, Any]:
+    """Validate a Clerk session token and return its claims.
+
+    ``issuer``, ``audience`` and the JWKS endpoint always come from server-side
+    configuration — never from the request. Time checks (``exp``, ``nbf``,
+    future-dated ``iat``) are enforced by the verifier against the wall clock
+    with :data:`DEFAULT_LEEWAY_SECONDS` of tolerance; tests control token
+    lifetimes by minting tokens with the timestamps they want.
+
+    Raises :class:`TokenError` with ``reason`` set to
+    ``identity_provider_unavailable`` when no key material could be obtained at
+    all; the HTTP layer answers 503 for that one reason, because refusing to
+    sign a user out of a live session because the provider's *public-key
+    endpoint* blipped would turn an outage into a logout.
+    """
+    if not issuer:
+        raise TokenError(
+            "auth_not_configured", "Bearer-token authentication is not configured on this server"
+        )
+    if not isinstance(token, str) or not token.strip():
+        raise TokenError("missing_token", "A bearer token is required")
+
+    try:
+        header = jwt.get_unverified_header(token.strip())
+    except Exception as cause:  # noqa: BLE001 - normalised into a TokenError
+        raise TokenError("malformed_token", "The bearer token is malformed") from cause
+
+    # The allowlist is ours. A header claiming HS256/none is rejected here, and
+    # PyJWT would independently refuse it, because ``algorithms`` is pinned.
+    if header.get("alg") not in ALLOWED_ALGORITHMS:
+        raise TokenError("unsupported_algorithm", "Unsupported token algorithm")
+
+    try:
+        key = jwks_client.get_key(header.get("kid"))
+    except JwksUnavailableError as cause:
+        raise TokenError(cause.reason, cause.message) from cause
+    except JwksError as cause:
+        raise TokenError(cause.reason, cause.message) from cause
+
+    options: dict[str, Any] = {
+        "require": ["exp", "iat", "sub"],
+        "verify_signature": True,
+        # Clerk only sets ``aud`` when the JWT template names an API instance,
+        # so audience checking is enabled exactly when it is configured.
+        "verify_aud": bool(audience),
+    }
+    try:
+        claims = jwt.decode(
+            token.strip(),
+            key,
+            algorithms=list(ALLOWED_ALGORITHMS),
+            issuer=issuer,
+            audience=audience or None,
+            leeway=leeway_seconds,
+            options=options,
+        )
+    except Exception as cause:  # noqa: BLE001 - every PyJWT error is a rejection
+        raise _token_error_for_jwt_exception(cause) from cause
+
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject.strip():
+        raise TokenError("missing_claims", "The bearer token has an empty subject")
     return claims

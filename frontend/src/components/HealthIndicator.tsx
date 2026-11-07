@@ -1,35 +1,47 @@
 import { fetchHealth } from "../api/demo";
 import { useApiQuery } from "../hooks/useApiQuery";
+import { TONE_SOLID } from "./ui/statusClasses";
+import type { Tone } from "../lib/semantic";
+
+interface HealthState {
+  tone: Tone;
+  label: string;
+  pending: boolean;
+}
 
 /**
  * Live API status indicator. Uses the backend liveness endpoint, so it works
  * even when MySQL is not running.
+ *
+ * The dot colour comes from the shared status roles rather than a palette class
+ * at this call site, so "offline" reads exactly like an offline badge anywhere
+ * else in the product.
  */
 export function HealthIndicator() {
-  const { data, loading, error } = useApiQuery(fetchHealth);
+  const { data, loading, error } = useApiQuery(fetchHealth, []);
 
-  if (loading) {
-    return (
-      <span className="inline-flex items-center gap-2 text-xs text-slate-500" role="status">
-        <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" aria-hidden="true" />
-        Checking API…
-      </span>
-    );
-  }
-
-  if (error || !data) {
-    return (
-      <span className="inline-flex items-center gap-2 text-xs text-rose-700" role="status">
-        <span className="h-2 w-2 rounded-full bg-rose-500" aria-hidden="true" />
-        API offline
-      </span>
-    );
-  }
+  const state: HealthState = loading
+    ? { tone: "neutral", label: "Checking API…", pending: true }
+    : error || !data
+      ? { tone: "critical", label: "API offline", pending: false }
+      : {
+          tone: "success",
+          label: `API ${data.status} · ${data.environment} · v${data.version}`,
+          pending: false,
+        };
 
   return (
-    <span className="inline-flex items-center gap-2 text-xs text-emerald-700" role="status">
-      <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
-      API {data.status} · {data.environment} · v{data.version}
+    <span
+      role="status"
+      className="inline-flex min-w-0 items-center gap-2 text-meta text-ink-muted"
+    >
+      <span
+        aria-hidden="true"
+        className={`h-2 w-2 shrink-0 rounded-pill ${TONE_SOLID[state.tone]} ${
+          state.pending ? "animate-pulse" : ""
+        }`}
+      />
+      <span className="truncate">{state.label}</span>
     </span>
   );
 }

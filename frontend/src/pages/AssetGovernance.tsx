@@ -35,26 +35,12 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Spinner } from "../components/ui/Spinner";
 import { formatBytes, formatDate, humanize } from "../lib/format";
-
-type Tone = "slate" | "indigo" | "emerald" | "sky" | "amber" | "orange" | "rose";
-
-const SEVERITY_TONES: Record<string, Tone> = {
-  informational: "slate",
-  info: "slate",
-  low: "sky",
-  medium: "amber",
-  high: "orange",
-  blocked: "rose",
-};
-
-const RECOMMENDATION_TONES: Record<string, Tone> = {
-  RETAIN: "emerald",
-  ARCHIVE_RECOMMENDED: "sky",
-  REVIEW_REQUIRED: "amber",
-  DISPOSAL_REVIEW_REQUIRED: "orange",
-  BLOCKED_BY_HOLD: "rose",
-  NO_APPLICABLE_POLICY: "slate",
-};
+import {
+  toneForDecision,
+  toneForHoldStatus,
+  toneForRecommendation,
+  toneForSeverity,
+} from "../lib/semantic";
 
 const DECISION_OPTIONS: Array<{ value: DecisionValue; label: string }> = [
   { value: "retain", label: "Retain" },
@@ -84,8 +70,9 @@ export default function AssetGovernance() {
 
 function GovernanceView({ assetId }: { assetId: number }) {
   const { activeInstitutionId } = useAuth();
-  const { data, loading, error, refetch } = useApiQuery(() =>
-    fetchAssetGovernance(assetId, activeInstitutionId ?? undefined),
+  const { data, loading, error, refetch } = useApiQuery(
+    (signal) => fetchAssetGovernance(assetId, activeInstitutionId ?? undefined, signal),
+    [assetId, activeInstitutionId],
   );
 
   return (
@@ -298,8 +285,8 @@ function ClassificationCard({ detail }: { detail: GovernanceDetail }) {
         ) : (
           <div className="space-y-3 text-sm">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge tone="indigo">{humanize(result.outcome)}</Badge>
-              <Badge tone={result.confidence === "high" ? "emerald" : "slate"}>
+              <Badge tone="accent">{humanize(result.outcome)}</Badge>
+              <Badge tone={result.confidence === "high" ? "success" : "neutral"}>
                 confidence {result.confidence}
               </Badge>
               <span className="text-xs text-slate-500">
@@ -347,7 +334,7 @@ function QualityCard({ detail }: { detail: GovernanceDetail }) {
             {findings.map((finding, index) => (
               <li key={`${finding.check}-${index}`} className="px-4 py-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge tone={SEVERITY_TONES[finding.severity] ?? "slate"}>
+                  <Badge tone={toneForSeverity(finding.severity)}>
                     {finding.severity}
                   </Badge>
                   <span className="font-mono text-xs text-slate-600">{finding.check}</span>
@@ -447,7 +434,7 @@ function HoldsCard({ detail }: { detail: GovernanceDetail }) {
               {holds.map((hold) => (
                 <li key={hold.id} className="px-4 py-3 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge tone="rose">{hold.status}</Badge>
+                    <Badge tone={toneForHoldStatus(hold.status)}>{hold.status}</Badge>
                     <span className="font-medium text-slate-900">{hold.name}</span>
                   </div>
                   <p className="mt-1 text-xs text-slate-500">
@@ -535,7 +522,7 @@ function AssessmentCard({
                   key={`${assessment.assessed_at}-${index}`}
                   className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-slate-500"
                 >
-                  <Badge tone={RECOMMENDATION_TONES[assessment.recommendation] ?? "slate"}>
+                  <Badge tone={toneForRecommendation(assessment.recommendation)}>
                     {assessment.recommendation.replaceAll("_", " ")}
                   </Badge>
                   <span>
@@ -556,7 +543,7 @@ function AssessmentDetail({ assessment }: { assessment: Assessment }) {
   return (
     <div className="space-y-3 text-sm">
       <div className="flex flex-wrap items-center gap-3">
-        <Badge tone={RECOMMENDATION_TONES[assessment.recommendation] ?? "slate"}>
+        <Badge tone={toneForRecommendation(assessment.recommendation)}>
           {assessment.recommendation.replaceAll("_", " ")}
         </Badge>
         <span className="text-xs text-slate-500">
@@ -593,7 +580,7 @@ function AssessmentDetail({ assessment }: { assessment: Assessment }) {
           {assessment.findings.map((finding) => (
             <li key={finding.code} className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge tone={SEVERITY_TONES[finding.severity] ?? "slate"}>
+                <Badge tone={toneForSeverity(finding.severity)}>
                   {finding.severity}
                 </Badge>
                 <span className="font-mono text-xs text-slate-600">{finding.code}</span>
@@ -630,11 +617,13 @@ function DecisionHistoryCard({
             {decisions.map((decision) => (
               <li key={decision.id} className="px-4 py-3 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge tone="indigo">{decision.decision.replaceAll("_", " ")}</Badge>
+                  <Badge tone={toneForDecision(decision.decision)}>
+                    {decision.decision.replaceAll("_", " ")}
+                  </Badge>
                   {decision.id === effectiveDecisionId ? (
-                    <Badge tone="emerald">Effective</Badge>
+                    <Badge tone="success">Effective</Badge>
                   ) : null}
-                  {decision.is_superseded ? <Badge tone="amber">Superseded</Badge> : null}
+                  {decision.is_superseded ? <Badge tone="warning">Superseded</Badge> : null}
                   <span className="text-xs text-slate-500">
                     reviewer {decision.reviewer} · {formatDate(decision.decided_at.slice(0, 10))} ·
                     assessment #{decision.assessment_id}
@@ -760,7 +749,10 @@ function DecisionForm({
 
   // Earlier decisions this new one may replace. The server computes the list,
   // so the form can only offer real, already-authorized correction targets.
-  const candidates = useApiQuery(() => listSupersessionCandidates(assessmentId));
+  const candidates = useApiQuery(
+    (signal) => listSupersessionCandidates(assessmentId, signal),
+    [assessmentId],
+  );
   const options = candidates.data ?? [];
 
   // Untouched until the reviewer chooses, or until the eligible predecessors

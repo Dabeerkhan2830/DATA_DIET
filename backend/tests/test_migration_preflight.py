@@ -1,10 +1,10 @@
 """Tests for the read-only migration preflight (Phase 8, ADR-0018).
 
 The preflight only reads ``alembic_version`` and the local migration scripts.
-Production targets must be MySQL, so these tests inject a small read-only
-SQLite-backed revision reader for the classification cases and use a real
-subprocess only to prove that a non-MySQL URL is rejected. Nothing here applies
-a migration.
+Deployment targets are MySQL or PostgreSQL (ADR-0025), so these tests inject a
+small read-only SQLite-backed revision reader for the classification cases and
+use a real subprocess only to prove that an unsupported URL is rejected. Nothing
+here applies a migration.
 """
 
 from __future__ import annotations
@@ -21,10 +21,15 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "migration_preflight.py"
-HEAD = "0012_audit_platform_admin_reset"
+HEAD = "0014_external_identities"
+BASELINE = "0013_postgresql_baseline"
+AUDIT = "0012_audit_platform_admin_reset"
 RESET = "0011_platform_admin_default_false"
 BEFORE_RESET = "0010_classification_downgrade_safety"
 FAKE_MYSQL = "mysql+pymysql://preflight:not-a-secret@127.0.0.1:3306/datadiet_preflight"
+FAKE_POSTGRES = (
+    "postgresql+psycopg2://preflight:not-a-secret@127.0.0.1:5432/datadiet_preflight"
+)
 
 
 def _load_preflight():
@@ -88,6 +93,11 @@ def _assess_with_sqlite(preflight, tmp_path: Path, versions: list[str] | None):
     )
 
 
+def _assess_at(preflight, database_url: str, stamped: str):
+    """Classify ``stamped`` against the real history without touching a database."""
+    return preflight.assess(database_url, revision_reader=lambda _: stamped)
+
+
 def _run_cli(database_url: str) -> subprocess.CompletedProcess[str]:
     environment = {
         **os.environ,
@@ -129,7 +139,7 @@ def test_pending_0011_is_flagged(preflight, tmp_path) -> None:
     result = _assess_with_sqlite(preflight, tmp_path, [BEFORE_RESET])
 
     assert result.current_revision == BEFORE_RESET
-    assert result.pending == (RESET, HEAD)
+    assert result.pending == (RESET, AUDIT, BASELINE, HEAD)
     assert result.includes_admin_reset is True
 
 
@@ -175,12 +185,56 @@ def test_unreachable_database_is_reported(preflight, tmp_path) -> None:
     assert failure.value.status == 2
 
 
-def test_non_mysql_target_is_rejected(preflight, tmp_path) -> None:
+def test_sqlite_target_is_rejected(preflight, tmp_path) -> None:
     with pytest.raises(preflight.PreflightError) as failure:
         preflight.assess(_database(tmp_path, [HEAD]))
 
     assert failure.value.status == 6
-    assert "only MySQL" in str(failure.value)
+    assert "unsupported database dialect 'sqlite'" in str(failure.value)
+    assert "mysql" in str(failure.value)
+    assert "postgresql" in str(failure.value)
+
+
+def test_postgresql_target_is_supported(preflight) -> None:
+    result = _assess_at(preflight, FAKE_POSTGRES, HEAD)
+
+    assert result.dialect == "postgresql"
+    assert result.current_revision == HEAD
+    assert result.pending == ()
+    assert result.needs_postgres_baseline is False
+
+
+def test_postgresql_stamped_at_0012_reports_the_baseline_as_pending(preflight) -> None:
+    """A fresh PostgreSQL database is stamped at 0012, not migrated from 0001."""
+    result = _assess_at(preflight, FAKE_POSTGRES, AUDIT)
+
+    assert result.dialect == "postgresql"
+    assert result.pending == (BASELINE, HEAD)
+    assert result.needs_postgres_baseline is True
+    assert result.includes_admin_reset is False
+
+
+def test_the_postgres_baseline_warning_is_dialect_specific(preflight) -> None:
+    """MySQL replaying 0013 is a no-op, so it must not look like a baseline path."""
+    result = _assess_at(preflight, FAKE_MYSQL, BEFORE_RESET)
+
+    assert result.dialect == "mysql"
+    assert BASELINE in result.pending
+    assert result.needs_postgres_baseline is False
+
+
+def test_read_stamped_revision_rejects_sqlite_before_connecting(preflight, monkeypatch) -> None:
+    """The dialect gate runs first: no engine is ever built for SQLite."""
+
+    def no_engine(_database_url: str):
+        raise AssertionError("a SQLite engine must not be created")
+
+    monkeypatch.setattr(preflight, "create_engine", no_engine)
+
+    with pytest.raises(preflight.PreflightError) as failure:
+        preflight._read_stamped_revision("sqlite:///datadiet.db")
+
+    assert failure.value.status == 6
 
 
 def test_error_detail_scrubs_raw_and_encoded_passwords(preflight) -> None:
@@ -235,7 +289,8 @@ def test_cli_reports_pending_0011_and_exits_zero(preflight, monkeypatch, capsys)
         lambda _url: preflight.PreflightResult(
             current_revision=BEFORE_RESET,
             head_revision=HEAD,
-            pending=(RESET, HEAD),
+            pending=(RESET, AUDIT, BASELINE, HEAD),
+            dialect="mysql",
         ),
     )
 
@@ -245,6 +300,35 @@ def test_cli_reports_pending_0011_and_exits_zero(preflight, monkeypatch, capsys)
     assert "WARNING" in output
     assert "backup" in output
     assert "recovery plan" in output
+    assert "alembic stamp" not in output
+
+
+def test_cli_shows_the_postgres_entry_path_and_not_the_reset_warning(
+    preflight, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        preflight,
+        "get_settings",
+        lambda: SimpleNamespace(environment="test", database_url=FAKE_POSTGRES),
+    )
+    monkeypatch.setattr(
+        preflight,
+        "assess",
+        lambda _url: preflight.PreflightResult(
+            current_revision=AUDIT,
+            head_revision=HEAD,
+            pending=(BASELINE, HEAD),
+            dialect="postgresql",
+        ),
+    )
+
+    assert preflight.main() == 0
+    output = capsys.readouterr().out
+    assert "postgresql" in output
+    assert "alembic stamp 0012_audit_platform_admin_reset" in output
+    assert "alembic upgrade head" in output
+    assert "Never upgrade from 0001" in output
+    assert "WARNING" not in output
 
 
 def test_cli_fails_clearly_outside_alembic_control(preflight, monkeypatch, capsys) -> None:

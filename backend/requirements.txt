@@ -2,7 +2,28 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.8
-pydantic-settings>=2.4
+# 2.7 is the first release exporting NoDecode, which keeps CORS_ORIGINS readable
+# as the flat comma-separated string that deployed platforms can actually carry.
+pydantic-settings>=2.7
 SQLAlchemy>=2.0.30
 alembic>=1.13
 PyMySQL>=1.1
+# Phase 6.0 (ADR-0025): PostgreSQL is the staging target. The `+psycopg2` driver
+# suffix in DATABASE_URL selects this package; a bare `postgresql://` URL would
+# make SQLAlchemy import psycopg3 instead, which is not installed.
+psycopg2-binary>=2.9
+# Clerk session-token verification (RS256 + JWKS). The `crypto` extra pulls
+# cryptography, which PyJWT needs to build RSA public keys from JWK material —
+# without it, `jwt.algorithms.RSAAlgorithm.from_jwk` is unavailable and every
+# Clerk token fails closed. Bare PyJWT therefore cannot serve this path.
+# 2.10 is the floor; the verification and JWKS tests were run against 2.15.1.
+PyJWT[crypto]>=2.10
+# Phase 6.x: Azure Blob object-storage provider. Only the SDK's public client
+# surface is used, behind app/services/storage, and it is imported lazily so a
+# STORAGE_PROVIDER=none deployment never loads it. Hand-rolling the SharedKey
+# signature instead would put storage authentication crypto under our own
+# maintenance, so the official client is the deliberate choice.
+# No claim is made about older releases: 12.31.1 is the only version this
+# integration was exercised against (mocked suite plus a live Floci emulator
+# run), so the floor is that minor line rather than an unverified older one.
+azure-storage-blob>=12.31,<13

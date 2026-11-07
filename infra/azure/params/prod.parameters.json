@@ -1,0 +1,125 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "comments": [
+      "Production-shaped parameter set. It is a TEMPLATE, not a working configuration: nothing has been deployed and no tier, region, hostname or subscription is asserted as correct (docs/azure-architecture.md).",
+      "Values marked DECIDE are open decisions in docs/azure-architecture.md and must be settled with an Azure operator and a live price check before first use.",
+      "mysqlNetworkMode=private-endpoint is only usable end-to-end once the App Service plan has VNet integration, which main.bicep does not create — until then the backend cannot reach a private-only MySQL. See docs/azure-deployment.md section 6.",
+      "No secret value belongs in this file."
+    ]
+  },
+  "parameters": {
+    "environment": {
+      "value": "prod"
+    },
+    "location": {
+      "value": "<AZURE_REGION_E.G._WESTEUROPE>"
+    },
+    "nameToken": {
+      "value": "<3-10_LOWERCASE_ALNUM_GLOBALLY_UNIQUE>"
+    },
+    "namePrefix": {
+      "value": "datadiet"
+    },
+    "tags": {
+      "value": {
+        "owner": "<TEAM_OR_OWNER_CONTACT>",
+        "costCenter": "<OPTIONAL_COST_CENTER>",
+        "dataClassification": "<DECIDE_institutional-metadata>"
+      }
+    },
+    "backendCorsOrigins": {
+      "value": [
+        "https://<PRODUCTION_HOSTNAME>"
+      ]
+    },
+    "demoDataEnabled": {
+      "value": false
+    },
+    "authDevProviderEnabled": {
+      "value": false
+    },
+    "authJwtIssuer": {
+      "value": "<DECIDE_identity-provider-issuer-when-oidc-lands>"
+    },
+    "authJwtAudience": {
+      "value": "datadiet-api"
+    },
+    "authTokenTtlSeconds": {
+      "value": 3600
+    },
+    "appServiceSkuName": {
+      "value": "DECIDE:S1-or-P1v3"
+    },
+    "appServiceInstanceCount": {
+      "value": 2
+    },
+    "pythonVersion": {
+      "value": "3.12"
+    },
+    "frontendSku": {
+      "value": "Standard"
+    },
+    "frontendCustomDomain": {
+      "value": "<DECIDE_PRODUCTION_HOSTNAME>"
+    },
+    "mysqlVersion": {
+      "value": "8.4"
+    },
+    "mysqlSkuName": {
+      "value": "DECIDE:GeneralPurpose_D2ds_v5"
+    },
+    "mysqlSkuCapacity": {
+      "value": 2
+    },
+    "mysqlStorageSizeGb": {
+      "value": 128
+    },
+    "mysqlBackupRetentionDays": {
+      "value": 35
+    },
+    "mysqlGeoRedundantBackup": {
+      "value": false
+    },
+    "mysqlHighAvailability": {
+      "value": false
+    },
+    "mysqlAdministratorLogin": {
+      "value": "datadietadmin"
+    },
+    "mysqlAdministratorLoginPassword": {
+      "reference": {
+        "keyVault": {
+          "id": "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<BOOTSTRAP_RG>/providers/Microsoft.KeyVault/vaults/<BOOTSTRAP_VAULT>"
+        },
+        "secretName": "datadiet-prod-mysql-admin-password"
+      }
+    },
+    "mysqlDatabaseName": {
+      "value": "datadiet"
+    },
+    "mysqlNetworkMode": {
+      "value": "private-endpoint"
+    },
+    "addressPrefixes": {
+      "value": [
+        "<DECIDE_VNET_ADDRESS_SPACE_E.G._10.70.0.0/16>"
+      ]
+    },
+    "keyVaultAllowPublicAccess": {
+      "value": true
+    },
+    "keyVaultFirewallIpRanges": {
+      "value": [
+        "<DECIDE_ALLOWED_ADMIN_CIDRS>"
+      ]
+    },
+    "keyVaultPrivateAccess": {
+      "value": false
+    },
+    "logAnalyticsWorkspaceResourceId": {
+      "value": "<DECIDE_EXISTING_WORKSPACE_ID_OR_EMPTY_TO_SKIP>"
+    }
+  }
+}

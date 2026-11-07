@@ -8,9 +8,9 @@ export interface EmptyStateProps {
 
 export function EmptyState({ title, message, action }: EmptyStateProps) {
   return (
-    <div className="rounded-xl border border-dashed border-slate-300 bg-white px-5 py-10 text-center">
-      <h2 className="text-sm font-semibold text-slate-800">{title}</h2>
-      <p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">{message}</p>
+    <div className="rounded-card border border-dashed border-line-strong bg-surface px-card-x py-10 text-center">
+      <h2 className="text-section font-semibold text-ink">{title}</h2>
+      <p className="mx-auto mt-1 max-w-lg text-supporting text-ink-muted">{message}</p>
       {action ? <div className="mt-4">{action}</div> : null}
     </div>
   );

@@ -1,55 +1,25 @@
-/** Maps domain values to display tones (see components/ui/Badge.tsx). */
+/**
+ * Compatibility shim for the pre-token tone helpers.
+ *
+ * The mapping itself now lives in `lib/semantic.ts`, which owns both the
+ * semantic colour roles and the domain tables; this module only keeps the old
+ * import path and export names resolving for existing call sites.
+ *
+ * @deprecated Import from `lib/semantic` instead.
+ */
 
-import type { PolicyStatus, RetentionAction, RiskBand, Sensitivity } from "../api/types";
+import type { ToneInput } from "./semantic";
 
-export type Tone = "slate" | "indigo" | "emerald" | "sky" | "amber" | "orange" | "rose";
+/**
+ * The union `lib/labels` originally exported — the palette names — widened to
+ * also accept the semantic roles the helpers now return, so code written
+ * against the old type keeps compiling.
+ */
+export type Tone = ToneInput;
 
-export function toneForSensitivity(sensitivity: Sensitivity): Tone {
-  switch (sensitivity) {
-    case "restricted":
-      return "rose";
-    case "confidential":
-      return "amber";
-    case "internal":
-      return "sky";
-    case "public":
-      return "emerald";
-  }
-}
-
-export function toneForRiskBand(band: RiskBand): Tone {
-  switch (band) {
-    case "critical":
-      return "rose";
-    case "high":
-      return "orange";
-    case "moderate":
-      return "amber";
-    case "low":
-      return "emerald";
-  }
-}
-
-export function toneForRetentionAction(action: RetentionAction): Tone {
-  switch (action) {
-    case "eligible_for_disposal":
-      return "rose";
-    case "review":
-      return "amber";
-    case "archive":
-      return "indigo";
-    case "retain":
-      return "emerald";
-  }
-}
-
-export function toneForPolicyStatus(status: PolicyStatus): Tone {
-  switch (status) {
-    case "active":
-      return "emerald";
-    case "draft":
-      return "amber";
-    case "retired":
-      return "slate";
-  }
-}
+export {
+  toneForPolicyStatus,
+  toneForRetentionAction,
+  toneForRiskBand,
+  toneForSensitivity,
+} from "./semantic";

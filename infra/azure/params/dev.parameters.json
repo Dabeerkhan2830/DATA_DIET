@@ -1,0 +1,117 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "comments": [
+      "Non-production Azure environment. Every <ANGLE-BRACKET> value is a placeholder an operator must replace; the deployment fails until they are, which is deliberate — a half-filled parameter file should not create resources.",
+      "The bootstrap vault referenced under mysqlAdministratorLoginPassword must already exist and must be readable by the deploying identity (Microsoft.KeyVault/vaults/deploy/action). It is NOT the vault this template creates: that one only receives application secrets after it exists.",
+      "No secret value belongs in this file. See infra/azure/README.md."
+    ]
+  },
+  "parameters": {
+    "environment": {
+      "value": "dev"
+    },
+    "location": {
+      "value": "<AZURE_REGION_E.G._WESTEUROPE>"
+    },
+    "nameToken": {
+      "value": "<3-10_LOWERCASE_ALNUM_GLOBALLY_UNIQUE>"
+    },
+    "namePrefix": {
+      "value": "datadiet"
+    },
+    "tags": {
+      "value": {
+        "owner": "<TEAM_OR_OWNER_CONTACT>",
+        "costCenter": "<OPTIONAL_COST_CENTER>",
+        "dataClassification": "synthetic-development-only"
+      }
+    },
+    "backendCorsOrigins": {
+      "value": [
+        "https://<STATIC_WEB_APP_HOSTNAME>.azurestaticapps.net"
+      ]
+    },
+    "demoDataEnabled": {
+      "value": true
+    },
+    "authDevProviderEnabled": {
+      "value": false
+    },
+    "appServiceSkuName": {
+      "value": "B1"
+    },
+    "appServiceInstanceCount": {
+      "value": 1
+    },
+    "pythonVersion": {
+      "value": "3.12"
+    },
+    "frontendSku": {
+      "value": "Free"
+    },
+    "frontendCustomDomain": {
+      "value": ""
+    },
+    "mysqlVersion": {
+      "value": "8.4"
+    },
+    "mysqlSkuName": {
+      "value": "Burstable_B2s"
+    },
+    "mysqlSkuCapacity": {
+      "value": 2
+    },
+    "mysqlStorageSizeGb": {
+      "value": 32
+    },
+    "mysqlBackupRetentionDays": {
+      "value": 7
+    },
+    "mysqlGeoRedundantBackup": {
+      "value": false
+    },
+    "mysqlHighAvailability": {
+      "value": false
+    },
+    "mysqlAdministratorLogin": {
+      "value": "datadietadmin"
+    },
+    "mysqlAdministratorLoginPassword": {
+      "reference": {
+        "keyVault": {
+          "id": "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<BOOTSTRAP_RG>/providers/Microsoft.KeyVault/vaults/<BOOTSTRAP_VAULT>"
+        },
+        "secretName": "datadiet-dev-mysql-admin-password"
+      }
+    },
+    "mysqlDatabaseName": {
+      "value": "datadiet"
+    },
+    "mysqlNetworkMode": {
+      "value": "public"
+    },
+    "mysqlFirewallRules": {
+      "value": [
+        {
+          "name": "allow-app-service-outbound",
+          "startIpAddress": "<APP_SERVICE_PLAN_OUTBOUND_IP>",
+          "endIpAddress": "<APP_SERVICE_PLAN_OUTBOUND_IP>"
+        }
+      ]
+    },
+    "keyVaultAllowPublicAccess": {
+      "value": true
+    },
+    "keyVaultFirewallIpRanges": {
+      "value": []
+    },
+    "keyVaultPrivateAccess": {
+      "value": false
+    },
+    "logAnalyticsWorkspaceResourceId": {
+      "value": ""
+    }
+  }
+}

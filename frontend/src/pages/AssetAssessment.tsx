@@ -1,15 +1,18 @@
 /**
  * Asset assessment detail (Phase 3).
  *
- * Runs a fresh assessment for one asset and shows its full history: every
- * finding, the evidence behind it, the policy version that applied, and any
- * blocking holds. Explanations are transparent; there is no opaque score and no
- * execution of archive or deletion.
+ * Shows one asset's assessment and its full history: every finding, the
+ * evidence behind it, the policy version that applied, and any blocking holds.
+ * Roles granted `retention:assess` can run a fresh assessment; other roles see
+ * the history read-only and no assessment is requested. Explanations are
+ * transparent; there is no opaque score and no execution of archive or
+ * deletion.
  */
 
 import { useParams } from "react-router-dom";
 import { assessAsset, getAssessmentHistory } from "../api/retention";
-import type { Assessment, AssessmentFinding, FindingSeverity } from "../api/types";
+import type { Assessment, AssessmentFinding } from "../api/types";
+import { useAuth } from "../auth/AuthContext";
 import { useApiQuery } from "../hooks/useApiQuery";
 import { PageHeader } from "../components/PageHeader";
 import { Badge } from "../components/ui/Badge";
@@ -18,22 +21,16 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Spinner } from "../components/ui/Spinner";
 import { formatDate } from "../lib/format";
-
-type Tone = "slate" | "indigo" | "emerald" | "sky" | "amber" | "orange" | "rose";
-
-const SEVERITY_TONES: Record<FindingSeverity, Tone> = {
-  informational: "slate",
-  low: "sky",
-  medium: "amber",
-  high: "orange",
-  blocked: "rose",
-};
+import { toneForSeverity } from "../lib/semantic";
 
 export default function AssetAssessment() {
   const params = useParams();
   const assetId = Number(params.assetId);
 
-  const history = useApiQuery(() => getAssessmentHistory(assetId));
+  const history = useApiQuery(
+    (signal) => getAssessmentHistory(assetId, signal),
+    [assetId],
+  );
 
   if (!Number.isInteger(assetId) || assetId <= 0) {
     return (
@@ -69,8 +66,39 @@ export default function AssetAssessment() {
   );
 }
 
+/**
+ * The runner only mounts for accounts holding `retention:assess`, so a role
+ * that cannot assess never issues the POST. The permission check is a usability
+ * gate; the backend re-checks it and remains authoritative.
+ */
 function RunAssessmentCard({ assetId }: { assetId: number }) {
-  const state = useApiQuery(() => assessAsset(assetId));
+  const { has, user } = useAuth();
+
+  if (!has("retention:assess")) {
+    return (
+      <Card>
+        <CardHeader
+          title="Current assessment"
+          description="Running assessments is restricted to roles granted the assess permission."
+        />
+        <CardBody>
+          <EmptyState
+            title="Your role cannot run assessments"
+            message={`Your account holds the ${user?.role ?? "no"} role, which does not include retention:assess, so no assessment was requested. Re-running an assessment stores a new history entry; previous entries are preserved even if policies or holds change. The server enforces this too, so it is not only a UI restriction.`}
+          />
+        </CardBody>
+      </Card>
+    );
+  }
+
+  return <AssessmentRunner assetId={assetId} />;
+}
+
+function AssessmentRunner({ assetId }: { assetId: number }) {
+  // assessAsset is a POST that records a new assessment. It deliberately
+  // ignores the run signal: cancelling the client's view of an accepted
+  // mutation would not undo it on the server.
+  const state = useApiQuery(() => assessAsset(assetId), [assetId]);
 
   return (
     <Card>
@@ -103,7 +131,7 @@ function AssessmentDetail({ assessment }: { assessment: Assessment }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <Badge tone={assessment.holds_active > 0 ? "rose" : "slate"}>
+        <Badge tone={assessment.holds_active > 0 ? "critical" : "neutral"}>
           {assessment.recommendation.replaceAll("_", " ")}
         </Badge>
         {assessment.holds_active > 0 ? (
@@ -170,7 +198,7 @@ function FindingList({ findings }: { findings: AssessmentFinding[] }) {
         {findings.map((finding) => (
           <li key={finding.code} className="px-4 py-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge tone={SEVERITY_TONES[finding.severity]}>{finding.severity}</Badge>
+              <Badge tone={toneForSeverity(finding.severity)}>{finding.severity}</Badge>
               <span className="font-mono text-xs text-slate-600">{finding.code}</span>
             </div>
             <p className="mt-1 text-sm text-slate-800">{finding.message}</p>

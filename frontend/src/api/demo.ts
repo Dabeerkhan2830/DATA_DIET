@@ -19,20 +19,20 @@ import type {
 
 export const API_PREFIX = "/api/v1";
 
-export function fetchHealth(): Promise<HealthResponse> {
-  return apiGet<HealthResponse>(`${API_PREFIX}/health`);
+export function fetchHealth(signal?: AbortSignal): Promise<HealthResponse> {
+  return apiGet<HealthResponse>(`${API_PREFIX}/health`, signal);
 }
 
-export function fetchDashboard(): Promise<DemoEnvelope<DashboardSummary>> {
-  return apiGet<DemoEnvelope<DashboardSummary>>(`${API_PREFIX}/demo/dashboard`);
+export function fetchDashboard(signal?: AbortSignal): Promise<DemoEnvelope<DashboardSummary>> {
+  return apiGet<DemoEnvelope<DashboardSummary>>(`${API_PREFIX}/demo/dashboard`, signal);
 }
 
-export function fetchInventory(): Promise<DemoEnvelope<InventoryRecord[]>> {
-  return apiGet<DemoEnvelope<InventoryRecord[]>>(`${API_PREFIX}/demo/inventory`);
+export function fetchInventory(signal?: AbortSignal): Promise<DemoEnvelope<InventoryRecord[]>> {
+  return apiGet<DemoEnvelope<InventoryRecord[]>>(`${API_PREFIX}/demo/inventory`, signal);
 }
 
-export function fetchRiskAnalysis(): Promise<DemoEnvelope<RiskAnalysisPage>> {
-  return apiGet<DemoEnvelope<RiskAnalysisPage>>(`${API_PREFIX}/demo/risk`);
+export function fetchRiskAnalysis(signal?: AbortSignal): Promise<DemoEnvelope<RiskAnalysisPage>> {
+  return apiGet<DemoEnvelope<RiskAnalysisPage>>(`${API_PREFIX}/demo/risk`, signal);
 }
 
 export function fetchRetention(): Promise<DemoEnvelope<RetentionPage>> {
