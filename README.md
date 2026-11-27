@@ -1,4 +1,4 @@
- DataDiet
+# DataDiet
 
 **Intelligent data lifecycle and privacy-management platform.** DataDiet
 inventories institutional records, identifies duplicate candidates, assesses
